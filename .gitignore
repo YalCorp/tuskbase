@@ -1,21 +1,13 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.coverage
-htmlcov/
+# Go
+bin/
+*.test
+*.out
+*.prof
+coverage.out
+
+# Build artifacts
 dist/
 build/
-*.egg-info/
-
-# Virtual environments
-.venv/
-venv/
-env/
 
 # Local environment and secrets
 .env

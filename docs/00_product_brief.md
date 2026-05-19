@@ -63,7 +63,7 @@ The first product surfaces are:
 - local HTTP API server,
 - local MCP server.
 
-The API and MCP server should expose the same core loop through shared application use cases.
+The API and MCP server should expose the same core loop through shared application use cases. The first implementation should be a Go local service that can run both surfaces from one process.
 
 A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
 
@@ -152,5 +152,6 @@ Phase 1 is credible when:
 - lookup retrieves that decision,
 - preflight catches the Redis conflict example,
 - preflight does not mislabel compatible Postgres token decisions as conflicts,
+- the local Go service hosts the API and MCP surfaces through the same application core,
 - API and MCP expose the same core loop,
 - default tests run without external embedding services.

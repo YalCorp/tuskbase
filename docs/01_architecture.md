@@ -20,6 +20,8 @@ Those behaviors should live in the domain and application layers. Technologies s
 
 The first product surfaces are the local HTTP API server and local MCP server. Both should call the same application use cases.
 
+The intended runtime is a Go local service. Go is a product delivery choice: it supports a single native binary, straightforward concurrency, low local resource use, and simple packaging for agent workflows. Domain and application logic should still avoid depending on concrete HTTP, MCP, database, vector, or embedding packages.
+
 Later surfaces, such as a UI or SDKs, should use the same contracts or application core rather than introducing separate business logic.
 
 ```text
@@ -62,7 +64,7 @@ Concrete adapters implement these boundaries. Replacing an adapter should not re
 
 ## Canonical Records And Derived Indexes
 
-Canonical records should be stored through durable store interfaces. The first durable implementation may be Postgres, but the core architecture should not assume Postgres.
+Canonical records should be stored through durable store interfaces. The first durable implementation may be SQLite for zero-config local use, while Postgres can follow as a team or scale adapter. The core architecture should not assume either one.
 
 Vector search is a retrieval layer, not the source of truth. Vector indexes are derived and rebuildable. If embedding generation or vector indexing fails, canonical decision writes should still succeed and derived indexing should be repairable later.
 
@@ -76,11 +78,12 @@ The exact storage shape is an implementation detail. Phase 1 can use a relationa
 
 Phase 1 should focus on:
 
+- single-process Go local service,
 - local HTTP API server,
 - local MCP server,
 - shared application use cases,
 - replaceable storage, vector, and embedding adapters,
-- offline-friendly tests.
+- offline-friendly Go tests.
 
 A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
 

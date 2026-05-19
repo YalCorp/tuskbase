@@ -29,6 +29,8 @@ attach -> lookup -> preflight -> remember
 
 The first product surfaces are the local HTTP API server and the local MCP server. Both should use the same application core.
 
+The intended first runtime is a Go local service that can host both surfaces from one process. The goal is boring installation: a native binary first, with packaging wrappers such as npm or Homebrew later only as distribution conveniences.
+
 A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
 
 ### HTTP API
@@ -56,7 +58,7 @@ A UI can come after the API and MCP flows are useful. SDKs can come after the co
 
 ## Architecture Direction
 
-Tuskbase is interface-first. The product is not Postgres, pgvector, Qdrant, Kafka, FastAPI, MCP SDKs, a UI framework, an SDK, or any single embedding provider. Those are adapters.
+Tuskbase is interface-first. The product is not Postgres, pgvector, Qdrant, Kafka, a Go package, an MCP SDK, a UI framework, an SDK, or any single embedding provider. Those are adapters.
 
 The intended shape is:
 
@@ -70,7 +72,7 @@ HTTP API / MCP / later UI / later SDKs / optional support CLI
 
 The domain and application layers should depend on explicit ports such as `EntryStore`, `GraphStore`, `VectorIndex`, `DocumentStore`, `ReceiptStore`, `ConflictStore`, and `EmbeddingProvider`. Concrete technologies belong at the composition root and adapter layer.
 
-Postgres and pgvector may be the first durable local adapters, but they are not product assumptions. Canonical records live behind store interfaces. Vector indexes are derived and rebuildable. Embedding failures must not cause a decision to be lost.
+SQLite is the likely first durable local adapter because Tuskbase should be easy to run on a developer machine. Postgres and pgvector can follow as scale-oriented adapters, but they are not product assumptions. Canonical records live behind store interfaces. Vector indexes are derived and rebuildable. Embedding failures must not cause a decision to be lost.
 
 ## Docs
 

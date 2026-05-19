@@ -15,12 +15,12 @@ Tuskbase is in foundation stage.
 
 Use sources in this order:
 
-1. Explicit instructions from Priyavrat in the current task.
+1. Explicit instructions in the current task.
 2. Active docs in this repository.
 3. The current `README.md`.
 4. Historical or external reference material.
 
-If sources conflict, prefer newer explicit direction from Priyavrat, then active Tuskbase docs. Do not copy another product's structure, language, tech choices, or roadmap into Tuskbase without translating it into Tuskbase's product direction.
+If sources conflict, prefer newer explicit direction from the current task, then active Tuskbase docs. Do not copy another product's structure, language, tech choices, or roadmap into Tuskbase without translating it into Tuskbase's product direction.
 
 ## Product Guardrails
 
@@ -57,7 +57,7 @@ Design around domain models, application use cases, and explicit interfaces.
 
 Adapters are replaceable. Storage engines, vector indexes, embedding providers, API frameworks, MCP servers, UI frameworks, SDKs, CLI frameworks, queues, hooks, and dashboards must not become core assumptions.
 
-Postgres and pgvector may be first local adapters, but they are not the product. FastAPI and the MCP SDK may be first surface adapters, but they are not the product either. Kafka, Qdrant, SQLite, Neo4j, Typer, Ollama, OpenAI, UI frameworks, SDK tooling, and other tools must stay outside domain and application logic unless a future task explicitly changes that architecture.
+Go is the intended first runtime for the local service, but Go packages and framework choices are still composition-root concerns. SQLite may be the first local durable adapter, while Postgres and pgvector may follow as scale-oriented adapters; none of them are the product. Kafka, Qdrant, Neo4j, Ollama, OpenAI, UI frameworks, SDK tooling, and other tools must stay outside domain and application logic unless a future task explicitly changes that architecture.
 
 Use interface boundaries for concepts such as:
 
@@ -88,6 +88,7 @@ Domain and application code must not import adapter-specific packages directly.
 - Do not add `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, SDK docs, UI docs, CLI docs, or deployment guides unless requested.
 - Do not introduce a code skeleton, dependency manifest, Docker setup, CI, CLI, UI, SDK, or tests unless requested.
 - Do not hard-code a single storage, vector, embedding, queue, or API technology into architectural language.
+- When discussing implementation direction, prefer Go for the core local service unless the project owner explicitly changes that runtime decision.
 - Commit messages must use `type(scope): comment` format, with scope optional: `type: comment`. Examples: `docs: update architecture guide`, `docs(readme): clarify project status`.
 
 ## Future Implementation Rules
