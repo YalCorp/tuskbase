@@ -44,3 +44,6 @@ tmp/
 *.swo
 .DS_Store
 Thumbs.db
+
+# Local-only workspace notes and scratch files
+.local/
