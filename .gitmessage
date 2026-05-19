@@ -1,0 +1,9 @@
+# type(scope): comment
+#
+# Scope is optional:
+# type: comment
+#
+# Examples:
+# docs: update architecture guide
+# docs(readme): clarify project status
+# chore: update git template
