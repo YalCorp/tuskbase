@@ -4,12 +4,12 @@ This file tells AI coding agents how to work in this repository. It is an operat
 
 ## Current Repo Stage
 
-Tuskbase is in foundation stage.
+Tuskbase has its first implementation slice.
 
-- The repository currently contains product and architecture docs only.
-- Runtime API routes, MCP tools, adapters, UI, SDKs, and package structure are planned, not implemented.
-- Do not claim shipped functionality exists until code implements it.
-- Do not add application code, package scaffolding, contribution rules, or governance files unless explicitly asked.
+- The repository includes product and architecture docs plus a local Go service.
+- Implemented runtime surfaces are the local HTTP API, stdio MCP tools, SQLite storage, a Postgres store adapter package, deterministic text lookup, and simple preflight conflict detection.
+- UI, SDKs, pgvector, Qdrant, cloud sync, packaging wrappers, contribution rules, and governance files are still deferred unless explicitly requested.
+- Do not claim functionality exists until code implements it.
 
 ## Source Priority
 

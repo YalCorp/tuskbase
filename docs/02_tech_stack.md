@@ -22,13 +22,15 @@ These defaults are meant to make the first implementation practical while preser
 | Server runtime | Go local service, built toward a single native binary. |
 | HTTP surface | Go HTTP adapter at the edge, sharing the same application core as MCP. |
 | Agent integration | Local MCP server as a first-class surface, hosted by the Go service. |
-| Durable storage | SQLite as the likely first zero-config local adapter; Postgres as a later team or scale adapter. |
+| Durable storage | SQLite as the zero-config local default; Postgres available as a shared/team store adapter behind the same ports. |
 | Semantic retrieval | Text search first, with vector retrieval behind `VectorIndex`; pgvector or another vector adapter can follow without becoming core. |
 | Embeddings | Local, OpenAI-compatible, and deterministic test providers behind one provider interface. |
 | Tests | Offline-friendly Go tests with fake providers by default. |
 | Distribution | Native binary first; npm/Homebrew-style wrappers can come later as packaging conveniences. |
 
 These choices should live at the edge of the system. Domain and application code should depend on interfaces rather than concrete libraries or services.
+
+The Postgres adapter is implemented as a `database/sql` adapter. Runtime composition must register a Postgres driver, such as pgx stdlib, before calling `postgres.Open`; SQLite remains the default binary wiring.
 
 ## Adapter Boundaries
 
@@ -66,7 +68,7 @@ Likely later additions:
 
 - audit UI after API and MCP flows are useful,
 - SDKs after contracts are stable,
-- alternate durable stores behind store interfaces,
+- production wiring and driver selection for alternate durable stores,
 - alternate vector indexes behind the vector interface,
 - hooks for coding-agent workflows,
 - optional support CLI if local operations need it.

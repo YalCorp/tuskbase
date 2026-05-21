@@ -8,7 +8,7 @@ Tuskbase helps coding agents share repo context and decision history before they
 
 Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
 
-> Project status: foundation stage. This repository currently describes the product direction and architecture. Runtime API routes, MCP tools, adapters, UI, and SDKs are planned interfaces, not shipped functionality yet.
+> Project status: first implementation slice. This repository now includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, preflight conflict detection, lookup receipts, an HTTP API, and local MCP tools. UI, SDKs, cloud sync, embeddings, and packaging wrappers are still deferred.
 
 ## How It Works
 
@@ -25,11 +25,11 @@ attach -> lookup -> preflight -> remember
 | `preflight` | Check whether a proposal follows, extends, duplicates, supersedes, or conflicts with prior direction. |
 | `remember` | Store the final decision with reasoning, evidence, claims, files, and relationships. |
 
-## Intended Interfaces
+## Current Interfaces
 
-The first product surfaces are the local HTTP API server and the local MCP server. Both should use the same application core.
+The first product surfaces are the local HTTP API server and the local MCP server. Both use the same application core in this repository.
 
-The intended first runtime is a Go local service that can host both surfaces from one process. The goal is boring installation: a native binary first, with packaging wrappers such as npm or Homebrew later only as distribution conveniences.
+The current runtime is a Go local service. It can run the HTTP surface, the stdio MCP surface, or both from the same binary, backed by local SQLite storage. Packaging wrappers such as npm or Homebrew remain later distribution conveniences.
 
 A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
 
@@ -72,7 +72,7 @@ HTTP API / MCP / later UI / later SDKs / optional support CLI
 
 The domain and application layers should depend on explicit ports such as `EntryStore`, `GraphStore`, `VectorIndex`, `DocumentStore`, `ReceiptStore`, `ConflictStore`, and `EmbeddingProvider`. Concrete technologies belong at the composition root and adapter layer.
 
-SQLite is the likely first durable local adapter because Tuskbase should be easy to run on a developer machine. Postgres and pgvector can follow as scale-oriented adapters, but they are not product assumptions. Canonical records live behind store interfaces. Vector indexes are derived and rebuildable. Embedding failures must not cause a decision to be lost.
+SQLite is the default durable local adapter because Tuskbase should be easy to run on a developer machine. A Postgres store adapter now exists behind the same ports for shared/team deployments, but it is still an adapter rather than product identity. Canonical records live behind store interfaces. Search indexes are derived and rebuildable. Indexing failures must not cause a decision to be lost.
 
 ## Docs
 
