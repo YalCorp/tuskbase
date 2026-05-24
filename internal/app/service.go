@@ -132,6 +132,7 @@ type RememberOutput struct {
 	QualityWarnings []string        `json:"quality_warnings,omitempty"`
 }
 
+// Remember stores the canonical decision first, then updates derived indexes. A retrieval failure should not erase the decision trail.
 func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutput, error) {
 	status, err := domain.ParseDecisionStatus(string(in.Status))
 	if err != nil {
@@ -193,7 +194,8 @@ func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutpu
 		decision.Evidence[i].Snippet = strings.TrimSpace(decision.Evidence[i].Snippet)
 	}
 	decision.Relationships = normalizeRememberRelationships(decision, in.Relationships, s.ids)
-	decision.CompletenessScore, outWarnings := scoreCompleteness(decision)
+	completenessScore, outWarnings := scoreCompleteness(decision)
+	decision.CompletenessScore = completenessScore
 	if err := decision.Validate(); err != nil {
 		return RememberOutput{}, err
 	}
