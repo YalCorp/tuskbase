@@ -2,6 +2,7 @@ package mcpadapter
 
 import (
 	"context"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -10,7 +11,15 @@ import (
 )
 
 func NewServer(service *app.Service) *mcp.Server {
-	server := mcp.NewServer(&mcp.Implementation{Name: "tuskbase", Version: "v0.1.0"}, nil)
+	return NewServerWithVersion(service, "dev")
+}
+
+func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		version = "dev"
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "tuskbase", Version: version}, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_attach",
