@@ -363,24 +363,34 @@ func (s *Store) GetDecision(ctx context.Context, id string) (domain.Decision, er
 	return d, nil
 }
 
+// RecentDecisions closes the base cursor before loading children because this adapter uses one SQLite connection.
 func (s *Store) RecentDecisions(ctx context.Context, workspaceID string, limit int) ([]domain.Decision, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT `+decisionSelectColumns+` FROM decisions WHERE workspace_id = ? AND valid_to IS NULL ORDER BY created_at DESC LIMIT ?`, workspaceID, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var decisions []domain.Decision
 	for rows.Next() {
 		d, err := scanDecisionBase(rows)
 		if err != nil {
-			return nil, err
-		}
-		if err := s.loadDecisionChildren(ctx, &d); err != nil {
+			_ = rows.Close()
 			return nil, err
 		}
 		decisions = append(decisions, d)
 	}
-	return decisions, rows.Err()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range decisions {
+		if err := s.loadDecisionChildren(ctx, &decisions[i]); err != nil {
+			return nil, err
+		}
+	}
+	return decisions, nil
 }
 
 func replaceDecisionChildren(ctx context.Context, tx *sql.Tx, d domain.Decision) error {
