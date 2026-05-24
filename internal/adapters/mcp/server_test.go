@@ -51,6 +51,34 @@ func TestAttachTool(t *testing.T) {
 	}
 }
 
+func TestNewServerWithVersionReportsVersion(t *testing.T) {
+	ctx := context.Background()
+	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "tuskbase.db"))
+	if err != nil {
+		t.Fatalf("sqlite.Open() error = %v", err)
+	}
+	defer store.Close()
+	service := app.NewService(store, store, app.UUIDGenerator{}, app.SystemClock{})
+	server := mcpadapter.NewServerWithVersion(service, "v9.8.7")
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "v0.0.1"}, nil)
+	clientTransport, serverTransport := mcp.NewInMemoryTransports()
+	serverSession, err := server.Connect(ctx, serverTransport, nil)
+	if err != nil {
+		t.Fatalf("server.Connect() error = %v", err)
+	}
+	defer serverSession.Close()
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	defer clientSession.Close()
+
+	got := clientSession.InitializeResult().ServerInfo.Version
+	if got != "v9.8.7" {
+		t.Fatalf("server version = %q, want %q", got, "v9.8.7")
+	}
+}
+
 func TestFoundationTools(t *testing.T) {
 	ctx := context.Background()
 	store, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "tuskbase.db"))
