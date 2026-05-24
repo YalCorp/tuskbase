@@ -1,0 +1,153 @@
+# Tuskbase Auth And Security Direction
+
+This document defines the intended auth and security posture for Tuskbase. It is direction, not a claim that every item is implemented today.
+
+Auth in Tuskbase has two jobs:
+
+1. Attribution: know who or what made a decision.
+2. Access control: decide who or what is allowed to read or write shared memory.
+
+Attribution starts immediately. Stronger access control arrives as Tuskbase moves from local single-user usage to shared and hosted usage.
+
+## Tiered Auth Model
+
+| Tier | Transport | Auth posture | Identity posture |
+|---|---|---|---|
+| Demo | stdio MCP | no auth | actor attribution in decision records |
+| Local Basic | loopback HTTP MCP daemon | loopback-only, optional local key later | actor attribution required |
+| Local Shared | loopback HTTP MCP daemon with Postgres | local API key required | per-agent identity required |
+| Hosted | remote HTTP MCP | TLS plus managed auth | workspace/org scoped identity |
+
+## Demo
+
+Demo uses stdio MCP and SQLite.
+
+Security posture:
+
+- no network listener,
+- no auth by default,
+- local process launched by the MCP client,
+- actor attribution still recorded.
+
+This is acceptable because the agent and Tuskbase communicate over stdin/stdout on the same machine.
+
+## Local Basic
+
+Local Basic runs a local daemon so multiple local tools can connect to one Tuskbase interface.
+
+Security posture:
+
+- bind to `127.0.0.1` by default,
+- no non-loopback bind without explicit opt-in,
+- actor attribution required on writes,
+- local API key can be optional at first but should be supported soon.
+
+Local Basic is still personal local software. The goal is to prevent accidental exposure and preserve useful attribution without making setup painful.
+
+## Local Shared
+
+Local Shared is more serious because multiple tools write into one Postgres-backed decision memory.
+
+Security posture:
+
+- bind to loopback by default,
+- local API key required for HTTP MCP,
+- each agent/tool gets its own identity,
+- writes are attributed to that identity,
+- audit events are stored for meaningful mutations,
+- unknown clients cannot write shared decisions.
+
+Minimum identities:
+
+```text
+codex
+claude
+cursor
+human:<name>
+system
+```
+
+Minimum actor fields:
+
+```json
+{
+  "kind": "agent",
+  "name": "codex"
+}
+```
+
+Later local keys should map to actor identity so clients cannot impersonate each other by only changing a JSON field.
+
+## Hosted
+
+Hosted is future-facing and requires a stronger model.
+
+Required posture:
+
+- TLS only,
+- API keys or OAuth-style auth,
+- workspace/org scoping,
+- role-based access,
+- key rotation,
+- key revocation,
+- audit logs,
+- no secrets in logs,
+- clear privacy controls for repo content and decision records.
+
+## Why Identity Matters
+
+Shared decision memory without identity becomes muddy.
+
+Tuskbase should be able to answer:
+
+```text
+Who proposed this?
+Which agent contradicted it?
+Who approved the superseding decision?
+Which tool keeps creating low-quality decisions?
+```
+
+This enables:
+
+- trust ranking,
+- human-approved decision priority,
+- conflict accountability,
+- agent quality analytics,
+- key revocation when a tool misbehaves,
+- audit trails for teams.
+
+## Permission Direction
+
+Initial local permissions can be simple:
+
+| Role | Can do |
+|---|---|
+| reader | lookup, recent, conflicts |
+| agent | reader actions plus preflight and remember |
+| admin | agent actions plus resolve conflicts, manage keys, configure store |
+
+Do not add enterprise RBAC before local/shared value is proven. Keep the model small and upgradeable.
+
+## Security Defaults
+
+Tuskbase should default to:
+
+- no public network exposure,
+- stdio MCP for Demo,
+- loopback-only HTTP MCP for daemon modes,
+- explicit opt-in for non-loopback bind,
+- API keys for Local Shared,
+- signed release artifacts,
+- checksums for downloaded binaries,
+- no telemetry by default.
+
+## Big Wins
+
+A stronger auth model gives Tuskbase:
+
+- attribution: every decision has a source,
+- trust: human-approved decisions can rank above agent guesses,
+- audit: teams can inspect decision history,
+- safety: unknown clients cannot mutate shared memory,
+- revocation: bad or leaked keys can be disabled,
+- hosted readiness: local identity concepts can grow into workspace/org auth.

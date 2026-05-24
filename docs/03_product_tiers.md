@@ -1,0 +1,225 @@
+# Tuskbase Product Tiers
+
+This document defines the intended product tiers for Tuskbase. It is direction, not a claim that every tier is implemented today.
+
+Tuskbase should serve the same core workflow across every tier:
+
+```text
+attach -> lookup -> preflight -> remember
+```
+
+The tiers differ by transport, storage, retrieval, and operational complexity.
+
+## Tier Summary
+
+| Tier | Primary user | MCP transport | Store | Retrieval | Setup goal |
+|---|---|---|---|---|---|
+| Demo | Someone proving Tuskbase works | stdio MCP | SQLite | text search | one binary, no infrastructure |
+| Local Basic | Solo developer using one or more local agents on one machine | local daemon, HTTP MCP | SQLite | text search, optional OpenAI embeddings | one Tuskbase interface always running |
+| Local Shared | Heavy solo developer or small local team setup using multiple agents/tools | local daemon, HTTP MCP | Postgres | text search plus pgvector | robust shared decision memory |
+| Hosted | Future managed team product | managed HTTP MCP | managed Postgres | managed vector retrieval | no self-managed infrastructure |
+
+## Demo
+
+Demo is the lowest-friction proof that Tuskbase works.
+
+Shape:
+
+```text
+agent app -> tuskbase stdio MCP -> SQLite
+```
+
+Use when:
+
+- one user is evaluating Tuskbase,
+- one agent process is enough,
+- local-only memory is acceptable,
+- zero setup matters more than robustness.
+
+Technology:
+
+- stdio MCP,
+- SQLite,
+- deterministic text search,
+- no Docker,
+- no Postgres,
+- no embeddings required,
+- no HTTP endpoints required.
+
+Tradeoff:
+
+- each agent client may launch its own process,
+- memory is local to one machine,
+- not ideal for heavy parallel agent usage,
+- not designed for cross-machine continuity.
+
+## Local Basic
+
+Local Basic is for solo developers who run multiple agent windows or tools on one machine but do not want a database stack yet.
+
+Shape:
+
+```text
+Codex / Claude / Cursor -> local Tuskbase daemon -> SQLite
+```
+
+Use when:
+
+- one developer uses multiple local agents,
+- all tools should talk to one Tuskbase interface,
+- local-only memory is still acceptable,
+- Docker and Postgres would be too much friction.
+
+Technology:
+
+- one local Tuskbase daemon,
+- HTTP MCP on loopback,
+- SQLite owned by the daemon,
+- text search by default,
+- optional OpenAI embeddings,
+- optional local embedding providers later.
+
+Why SQLite can work here:
+
+- many agents do not write directly to the SQLite file,
+- one daemon owns the database connection,
+- the daemon serializes writes and coordinates lookup/preflight/remember.
+
+Tradeoff:
+
+- still local to one machine,
+- less robust than Postgres for serious parallel usage,
+- not the right tier for shared team memory.
+
+## Local Shared
+
+Local Shared is for serious multi-agent workflows where decision memory must be more durable and concurrency-friendly.
+
+Shape:
+
+```text
+Codex / Claude / Cursor -> local Tuskbase daemon -> Postgres + pgvector
+```
+
+Use when:
+
+- a developer uses several coding agents heavily,
+- many windows/tools are active against the same repo,
+- decisions should survive and coordinate beyond a fragile local file,
+- the user may later want to continue across machines or move toward team usage.
+
+Technology:
+
+- one local Tuskbase daemon,
+- HTTP MCP on loopback by default,
+- Postgres as source of truth,
+- pgvector as the default serious vector search path,
+- OpenAI embeddings option,
+- Ollama option,
+- optional embedded local model later,
+- Docker Compose recommended for bundled local Postgres,
+- Supabase Postgres connection as an appealing no-local-infra option,
+- existing Postgres connection for advanced users.
+
+Recommended setup paths:
+
+| Path | Best for | Notes |
+|---|---|---|
+| Docker Compose Postgres | fully local shared setup | product feels bundled, but user needs Docker |
+| Supabase Postgres | easiest durable/cross-machine setup | no local Postgres, but repo memory leaves the machine |
+| Existing Postgres | advanced users | least hand-holding, most control |
+
+## Hosted
+
+Hosted is future-facing.
+
+Shape:
+
+```text
+agent app -> hosted Tuskbase HTTP MCP -> managed store
+```
+
+Use when:
+
+- teams want shared memory without running infrastructure,
+- cross-machine continuity matters,
+- auth, audit, billing, and managed operations are acceptable.
+
+Technology direction:
+
+- managed HTTP MCP,
+- managed Postgres,
+- pgvector by default,
+- Qdrant or another vector database only when scale requires it,
+- managed embedding provider chain,
+- workspace/org auth and audit.
+
+## Vector Retrieval
+
+Vector search is a derived retrieval layer, not the source of truth.
+
+The source of truth is always the durable store:
+
+```text
+SQLite or Postgres stores decisions.
+Vector indexes help find related decisions.
+```
+
+Recommended progression:
+
+| Tier | Vector strategy |
+|---|---|
+| Demo | none required, text search only |
+| Local Basic | optional OpenAI embeddings, text fallback |
+| Local Shared | pgvector default when embeddings are configured |
+| Hosted | pgvector first, Qdrant optional at scale |
+
+`pgvector` is not a lite version of Qdrant. It is the simplest serious vector path because it lives inside Postgres. Qdrant is a specialized vector database and should remain an optional scale adapter.
+
+## Embedding Providers
+
+Embeddings turn text into vectors so Tuskbase can find decisions by meaning, not only exact words.
+
+Provider direction:
+
+| Provider | Role |
+|---|---|
+| None | text search fallback; must always work |
+| OpenAI | easiest optional cloud embedding path for Local Basic and Local Shared |
+| Ollama | local model option for Local Shared and advanced local users |
+| Embedded local model | future best local UX if it can be shipped reliably |
+
+Ollama creates vectors locally. pgvector or Qdrant stores/searches those vectors. Postgres stores the actual decisions.
+
+## Temporal Graph
+
+Tuskbase needs a temporal decision graph, but not a dedicated graph database in the early product.
+
+Model this in the durable store first:
+
+```text
+decisions
+relationships
+conflicts
+valid_from
+valid_to
+transaction_time
+status
+```
+
+Relationship types:
+
+```text
+follows
+extends
+duplicates
+supersedes
+conflicts
+reconciles
+```
+
+A dedicated temporal graph database should be deferred until real query needs prove that relational modeling is insufficient.
+
+## Product Rule
+
+SQLite is the on-ramp. Postgres is the serious shared-memory path. pgvector is the default serious vector path. Qdrant is optional scale infrastructure. The same decision model and MCP tools should work across every tier.
