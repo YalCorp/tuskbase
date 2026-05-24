@@ -32,6 +32,30 @@ These choices should live at the edge of the system. Domain and application code
 
 The Postgres adapter is implemented as a `database/sql` adapter. Runtime composition must register a Postgres driver, such as pgx stdlib, before calling `postgres.Open`; SQLite remains the default binary wiring.
 
+## Product Tiers And Storage Direction
+
+Tuskbase should grow through four product tiers. The same application core and decision model should remain stable across them.
+
+| Tier | Intended use | MCP transport | Durable store | Retrieval direction |
+|---|---|---|---|---|
+| Demo | Prove Tuskbase works with the least setup | stdio MCP | SQLite | text search |
+| Local Basic | One developer using one or more local agents on one machine | local HTTP MCP daemon | SQLite | text search, optional OpenAI embeddings |
+| Local Shared | Heavy local multi-agent usage or small shared setup | local HTTP MCP daemon | Postgres | pgvector with OpenAI, Ollama, or future embedded embeddings |
+| Hosted | Future managed team product | managed HTTP MCP | managed Postgres | managed vector retrieval, Qdrant optional at scale |
+
+SQLite is the Demo and Local Basic default, not the ceiling for serious multi-agent workflows. Local Shared should use Postgres so Codex, Claude, Cursor, and other tools can coordinate through one durable decision store. Postgres also creates a natural path to pgvector, Supabase, self-hosted deployments, and future hosted Tuskbase.
+
+Vector search is a derived retrieval layer. Canonical decisions live in SQLite or Postgres first. pgvector is the default serious vector path because it keeps vectors with Postgres data. Qdrant or another vector database should remain an optional scale adapter, not a first-use requirement.
+
+Embeddings should be provider-based:
+
+- no embeddings required for Demo,
+- optional OpenAI embeddings for Local Basic,
+- OpenAI, Ollama, and eventually an embedded local model for Local Shared,
+- managed provider choices for Hosted later.
+
+Temporal graph behavior should be modeled in the durable store first with decision relationships, conflicts, `valid_from`, `valid_to`, `transaction_time`, and status fields. A dedicated temporal graph database is deferred until real query needs prove the relational model insufficient.
+
 ## Adapter Boundaries
 
 Tuskbase should keep clear interfaces around:
