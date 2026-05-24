@@ -8,7 +8,7 @@ Tuskbase helps coding agents share repo context and decision history before they
 
 Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
 
-> Project status: first implementation slice. This repository now includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, preflight conflict detection, lookup receipts, an HTTP API, and local MCP tools. UI, SDKs, cloud sync, embeddings, and packaging wrappers are still deferred.
+> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
 
 ## How It Works
 
@@ -25,15 +25,55 @@ attach -> lookup -> preflight -> remember
 | `preflight` | Check whether a proposal follows, extends, duplicates, supersedes, or conflicts with prior direction. |
 | `remember` | Store the final decision with reasoning, evidence, claims, files, and relationships. |
 
+## Quick Start
+
+Build or run the current Go command during development:
+
+```bash
+go run ./cmd/tuskbase version
+go run ./cmd/tuskbase init
+```
+
+Demo mode is the fastest path for one local MCP client:
+
+```bash
+go run ./cmd/tuskbase serve
+```
+
+Local Basic mode runs one loopback daemon so multiple local MCP clients can share the same SQLite-backed memory:
+
+```bash
+go run ./cmd/tuskbase daemon start
+```
+
+The Local Basic MCP endpoint is:
+
+```text
+http://127.0.0.1:8765/mcp
+```
+
+Generate example MCP client config:
+
+```bash
+go run ./cmd/tuskbase init-mcp codex --mode demo
+go run ./cmd/tuskbase init-mcp codex --mode local-basic
+```
+
+The REST API is optional and is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging:
+
+```bash
+go run ./cmd/tuskbase serve --http-mcp --rest
+```
+
 ## Current Interfaces
 
-The first product surfaces are the local HTTP API server and the local MCP server. Both use the same application core in this repository.
+The first product surface is MCP. Tuskbase currently supports two MCP paths from the same application core: stdio MCP for Demo mode and loopback HTTP MCP for Local Basic daemon mode.
 
-The current runtime is a Go local service. It can run the HTTP surface, the stdio MCP surface, or both from the same binary, backed by local SQLite storage. Packaging wrappers such as npm or Homebrew remain later distribution conveniences.
+The current runtime is a Go local service backed by local SQLite storage by default. Packaging wrappers such as npm, Homebrew, or GitHub release binaries remain distribution conveniences.
 
-A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
+A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. The CLI exists as a guided front door for setup, diagnostics, and daemon operation.
 
-### HTTP API
+### Optional REST API
 
 | Capability | Purpose |
 |---|---|
@@ -81,7 +121,10 @@ SQLite is the default durable local adapter because Tuskbase should be easy to r
 | [Product Brief](docs/00_product_brief.md) | Product identity, target users, core loop, and non-goals. |
 | [Architecture](docs/01_architecture.md) | Layering, interfaces, flows, and anti-drift rules. |
 | [Technology Direction](docs/02_tech_stack.md) | Current technology defaults and adapter boundaries. |
+| [Product Tiers](docs/03_product_tiers.md) | Demo, Local Basic, Local Shared, and Hosted product tier direction. |
+| [Auth And Security](docs/04_auth_security.md) | Tiered auth, identity, and security direction. |
 | [Security](SECURITY.md) | Vulnerability reporting and current security posture. |
+| [Changelog](CHANGELOG.md) | Release notes and notable project changes. |
 | [Agent Guide](AGENTS.md) | Instructions for AI coding agents working in this repo. |
 
 ## License
