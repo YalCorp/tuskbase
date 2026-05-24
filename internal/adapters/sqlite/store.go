@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -26,6 +28,7 @@ type Store struct {
 	db *sql.DB
 }
 
+// Open configures SQLite for one owning process. Local Basic should share this through the daemon instead of many agents writing the file directly.
 func Open(ctx context.Context, path string) (*Store, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("sqlite path is required")
@@ -65,14 +68,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	columns := map[string]string{
-		"valid_from":        "TEXT NOT NULL DEFAULT ''",
-		"valid_to":          "TEXT",
-		"transaction_time":  "TEXT NOT NULL DEFAULT ''",
-		"precedent_ref":     "TEXT NOT NULL DEFAULT ''",
-		"supersedes_id":     "TEXT NOT NULL DEFAULT ''",
+		"valid_from":         "TEXT NOT NULL DEFAULT ''",
+		"valid_to":           "TEXT",
+		"transaction_time":   "TEXT NOT NULL DEFAULT ''",
+		"precedent_ref":      "TEXT NOT NULL DEFAULT ''",
+		"supersedes_id":      "TEXT NOT NULL DEFAULT ''",
 		"completeness_score": "REAL NOT NULL DEFAULT 0",
-		"metadata_json":     "TEXT NOT NULL DEFAULT '{}'",
-		"alternatives_json": "TEXT NOT NULL DEFAULT '[]'",
+		"metadata_json":      "TEXT NOT NULL DEFAULT '{}'",
+		"alternatives_json":  "TEXT NOT NULL DEFAULT '[]'",
 	}
 	for column, definition := range columns {
 		if err := s.ensureColumn(ctx, "decisions", column, definition); err != nil {
@@ -565,6 +568,9 @@ func (s *Store) ReplaceWorkspaceDocuments(ctx context.Context, workspaceID strin
 	if _, err := tx.ExecContext(ctx, `DELETE FROM search_index WHERE workspace_id = ? AND kind = 'document'`, workspaceID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vector_index WHERE workspace_id = ? AND kind = 'document'`, workspaceID); err != nil {
+		return err
+	}
 	for _, doc := range docs {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO repo_documents(id, workspace_id, path, title, content, chunk_index, created_at, updated_at)
@@ -653,6 +659,9 @@ func (s *Store) IndexDecision(ctx context.Context, d domain.Decision) error {
 		return nil
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM search_index WHERE workspace_id = ? AND entity_id = ? AND kind IN ('decision', 'claim', 'evidence', 'alternative')`, d.WorkspaceID, d.ID); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM vector_index WHERE workspace_id = ? AND entity_id = ? AND kind IN ('decision', 'claim', 'evidence', 'alternative')`, d.WorkspaceID, d.ID); err != nil {
 		return err
 	}
 	text := strings.Join([]string{d.Type, d.Title, d.Outcome, d.Rationale, d.PrecedentRef, d.SupersedesID}, "\n")
@@ -749,6 +758,104 @@ LIMIT ?
 		results = append(results, r)
 	}
 	return results, rows.Err()
+}
+
+// UpsertVector keeps SQLite useful for Local Basic demos; Local Shared should move vector search to pgvector or another VectorStore.
+func (s *Store) UpsertVector(ctx context.Context, record ports.VectorRecord) error {
+	if strings.TrimSpace(record.WorkspaceID) == "" || len(record.Vector) == 0 {
+		return nil
+	}
+	data, err := json.Marshal(record.Vector)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO vector_index(workspace_id, kind, entity_id, title, path, body, vector_json)
+VALUES (?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(workspace_id, kind, entity_id, path) DO UPDATE SET
+    title = excluded.title,
+    body = excluded.body,
+    vector_json = excluded.vector_json
+`, record.WorkspaceID, record.Kind, record.EntityID, record.Title, record.Path, snippetText(record.Text), string(data))
+	return err
+}
+
+// SearchVector is intentionally simple and in-process. It is a correctness path, not the final high-scale vector strategy.
+func (s *Store) SearchVector(ctx context.Context, q ports.VectorQuery) ([]ports.SearchResult, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(q.Vector) == 0 || strings.TrimSpace(q.WorkspaceID) == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT kind, entity_id, workspace_id, title, path, body, vector_json
+FROM vector_index
+WHERE workspace_id = ?
+  AND (
+      kind = 'document'
+      OR EXISTS (
+          SELECT 1 FROM decisions d
+          WHERE d.id = vector_index.entity_id
+            AND d.workspace_id = vector_index.workspace_id
+            AND d.valid_to IS NULL
+      )
+  )
+`, q.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ports.SearchResult
+	for rows.Next() {
+		var r ports.SearchResult
+		var body, vectorJSON string
+		if err := rows.Scan(&r.Kind, &r.EntityID, &r.WorkspaceID, &r.Title, &r.Path, &body, &vectorJSON); err != nil {
+			return nil, err
+		}
+		var vector []float32
+		if err := json.Unmarshal([]byte(vectorJSON), &vector); err != nil || len(vector) == 0 {
+			continue
+		}
+		r.Score = cosine(q.Vector, vector)
+		r.Snippet = body
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+	if len(results) > limit {
+		results = results[:limit]
+	}
+	return results, nil
+}
+
+func cosine(a, b []float32) float64 {
+	if len(a) == 0 || len(b) == 0 || len(a) != len(b) {
+		return 0
+	}
+	var dot, na, nb float64
+	for i := range a {
+		av := float64(a[i])
+		bv := float64(b[i])
+		dot += av * bv
+		na += av * av
+		nb += bv * bv
+	}
+	if na == 0 || nb == 0 {
+		return 0
+	}
+	return dot / (math.Sqrt(na) * math.Sqrt(nb))
+}
+
+func snippetText(text string) string {
+	text = strings.TrimSpace(text)
+	if len(text) <= 240 {
+		return text
+	}
+	return text[:240] + "..."
 }
 
 const decisionSelectColumns = `
