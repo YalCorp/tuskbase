@@ -150,3 +150,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     body,
     tokenize='porter unicode61'
 );
+
+
+CREATE TABLE IF NOT EXISTS vector_index (
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    vector_json TEXT NOT NULL,
+    PRIMARY KEY(workspace_id, kind, entity_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vector_index_workspace_kind
+ON vector_index(workspace_id, kind, entity_id);
