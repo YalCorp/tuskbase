@@ -6,6 +6,15 @@ This project follows a human-readable changelog style inspired by Keep a Changel
 
 ## [Unreleased]
 
+### Added
+
+- Added `.env.example` for manual local configuration.
+- Added friendly `setup`, `start`, `status`, `connect`, and `auth show` CLI commands.
+
+### Security
+
+- Made HTTP MCP and REST require bearer auth by default, with `tuskbase setup` generating the Local Basic key and env vars available as manual overrides.
+
 ## [v0.1.0] - 2026-05-24
 
 ### Added

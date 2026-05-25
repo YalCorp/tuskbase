@@ -48,6 +48,16 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) error
 	case "version":
 		printVersion(stdout)
 		return nil
+	case "setup":
+		return runSetup(args[1:], stdout, stderr)
+	case "start":
+		return runServe(ctx, append([]string{"--http-mcp"}, args[1:]...), stdout, stderr)
+	case "status":
+		return runDaemonStatus(args[1:], stdout, stderr)
+	case "connect":
+		return runConnect(args[1:], stdout, stderr)
+	case "auth":
+		return runAuthCommand(args[1:], stdout, stderr)
 	case "serve":
 		return runServe(ctx, args[1:], stdout, stderr)
 	case "daemon":
@@ -58,7 +68,7 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		printInit(stdout)
 		return nil
 	case "init-mcp":
-		return runInitMCP(args[1:], stdout)
+		return runConnect(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -73,8 +83,8 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	fs.SetOutput(stderr)
 	httpMCP := fs.Bool("http-mcp", false, "serve MCP over loopback HTTP at /mcp")
 	rest := fs.Bool("rest", false, "also serve REST HTTP endpoints")
-	addr := fs.String("addr", envOrDefault("TUSKBASE_ADDR", "127.0.0.1:8765"), "HTTP listen address")
-	dbPath := fs.String("db", envOrDefault("TUSKBASE_DB_PATH", defaultDBPath()), "SQLite database path")
+	addr := fs.String("addr", configuredAddr(), "HTTP listen address")
+	dbPath := fs.String("db", configuredDBPath(), "SQLite database path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -102,29 +112,33 @@ func runDaemonCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 	case "start":
 		return runServe(ctx, append([]string{"--http-mcp"}, args[1:]...), stdout, stderr)
 	case "status":
-		fs := flag.NewFlagSet("daemon status", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		addr := fs.String("addr", envOrDefault("TUSKBASE_ADDR", "127.0.0.1:8765"), "daemon address")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		resp, err := http.Get("http://" + *addr + "/healthz")
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		_, _ = io.Copy(stdout, resp.Body)
-		return nil
+		return runDaemonStatus(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
 }
 
+func runDaemonStatus(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("status", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", configuredAddr(), "daemon address")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	resp, err := http.Get("http://" + *addr + "/healthz")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(stdout, resp.Body)
+	return nil
+}
+
 func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	addr := fs.String("addr", envOrDefault("TUSKBASE_ADDR", "127.0.0.1:8765"), "HTTP listen address")
-	dbPath := fs.String("db", envOrDefault("TUSKBASE_DB_PATH", defaultDBPath()), "SQLite database path")
+	addr := fs.String("addr", configuredAddr(), "HTTP listen address")
+	dbPath := fs.String("db", configuredDBPath(), "SQLite database path")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -143,6 +157,7 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	fmt.Fprintf(stdout, "db_path: %s\n", *dbPath)
 	fmt.Fprintf(stdout, "addr: %s\n", *addr)
 	fmt.Fprintf(stdout, "mcp: ok\n")
+	fmt.Fprintf(stdout, "auth_policy: %s\n", cfg.Auth.Name())
 	if strings.EqualFold(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER"), "openai") && strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
 		fmt.Fprintf(stdout, "openai: missing OPENAI_API_KEY\n")
 	} else {
@@ -176,6 +191,7 @@ func runInitMCP(args []string, stdout io.Writer) error {
 	case "local-basic":
 		fmt.Fprintf(stdout, "# %s MCP config for Tuskbase Local Basic\n", client)
 		fmt.Fprintf(stdout, "[mcp_servers.tuskbase]\nurl = \"http://127.0.0.1:8765/mcp\"\n")
+		fmt.Fprintf(stdout, "# HTTP MCP requires Authorization: Bearer <TUSKBASE_API_KEY>.\n")
 	default:
 		return fmt.Errorf("unknown MCP mode %q", *mode)
 	}
@@ -215,6 +231,7 @@ type runtimeConfig struct {
 	HTTPMCP    bool
 	REST       bool
 	Embeddings ports.EmbeddingProvider
+	Auth       daemon.AuthPolicy
 }
 
 func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, error) {
@@ -227,12 +244,16 @@ func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, 
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	return runtimeConfig{Addr: addr, DBPath: dbPath, HTTPMCP: httpMCP, REST: rest, Embeddings: emb}, nil
+	authPolicy, err := loadAuthPolicy(httpMCP || rest)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
+	return runtimeConfig{Addr: addr, DBPath: dbPath, HTTPMCP: httpMCP, REST: rest, Embeddings: emb, Auth: authPolicy}, nil
 }
 
 func newDaemon(ctx context.Context, cfg runtimeConfig) (*daemon.TuskbaseDaemon, error) {
 	logger := slog.Default()
-	return daemon.New(ctx, daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}, daemon.SQLiteStoreFactory{Path: cfg.DBPath, Embedding: cfg.Embeddings, Logger: logger}, daemon.NoAuthPolicy{})
+	return daemon.New(ctx, daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}, daemon.SQLiteStoreFactory{Path: cfg.DBPath, Embedding: cfg.Embeddings, Logger: logger}, cfg.Auth)
 }
 
 // loadEmbeddingProvider keeps embeddings optional; text lookup must stay usable without network access or a model provider.
@@ -248,6 +269,35 @@ func loadEmbeddingProvider() (ports.EmbeddingProvider, error) {
 	}
 }
 
+func loadAuthPolicy(required bool) (daemon.AuthPolicy, error) {
+	sharedKeys := strings.TrimSpace(os.Getenv("TUSKBASE_AGENT_KEYS"))
+	if sharedKeys != "" {
+		keys, err := daemon.ParseLocalSharedKeys(sharedKeys)
+		if err != nil {
+			return nil, err
+		}
+		return daemon.NewLocalSharedKeyPolicy(keys)
+	}
+	key := strings.TrimSpace(os.Getenv("TUSKBASE_API_KEY"))
+	if key != "" {
+		return daemon.NewLocalAPIKeyPolicy(key)
+	}
+	if cfg, found, err := loadUserConfig(); err != nil {
+		return nil, err
+	} else if found {
+		if len(cfg.AgentKeys) > 0 {
+			return daemon.NewLocalSharedKeyPolicy(cfg.AgentKeys)
+		}
+		if strings.TrimSpace(cfg.APIKey) != "" {
+			return daemon.NewLocalAPIKeyPolicy(cfg.APIKey)
+		}
+	}
+	if required {
+		return nil, errors.New("HTTP MCP and REST require auth; run `tuskbase setup` or set TUSKBASE_API_KEY")
+	}
+	return daemon.NoAuthPolicy{}, nil
+}
+
 func defaultDBPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -261,6 +311,26 @@ func envOrDefault(key, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func configuredAddr() string {
+	if value := strings.TrimSpace(os.Getenv("TUSKBASE_ADDR")); value != "" {
+		return value
+	}
+	if cfg, found, err := loadUserConfig(); err == nil && found && strings.TrimSpace(cfg.Addr) != "" {
+		return cfg.Addr
+	}
+	return defaultAddr
+}
+
+func configuredDBPath() string {
+	if value := strings.TrimSpace(os.Getenv("TUSKBASE_DB_PATH")); value != "" {
+		return value
+	}
+	if cfg, found, err := loadUserConfig(); err == nil && found && strings.TrimSpace(cfg.DBPath) != "" {
+		return cfg.DBPath
+	}
+	return defaultDBPath()
 }
 
 // requireLoopback is the Local Basic safety rail: HTTP MCP is useful locally, but should not quietly bind to the network.
@@ -294,18 +364,16 @@ func printVersion(w io.Writer) {
 }
 
 func printInit(w io.Writer) {
-	fmt.Fprint(w, `Choose your Tuskbase mode:
+	fmt.Fprint(w, `Run the guided setup:
 
-1. Demo
-   One agent, fastest setup.
-   Uses stdio MCP + SQLite.
+  tuskbase setup
 
-2. Local Basic
-   Multiple local agents/tools on one machine.
-   Run: tuskbase daemon start
-   Uses HTTP MCP daemon + SQLite.
+Recommended first path: Local Basic.
+It generates a local secret, stores it privately, and prepares Tuskbase for Codex, Claude Code, or Cursor.
 
-Local Shared with Postgres is planned after these tiers.
+Advanced paths:
+  tuskbase setup --mode demo
+  tuskbase setup --mode local-shared
 `)
 }
 
@@ -313,16 +381,28 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `Usage: tuskbase <command>
 
 Commands:
-  version                 Print version and build metadata
-  init                    Explain Demo and Local Basic setup paths
-  init-mcp [client]       Print MCP client config
-  serve                   Run Demo mode: stdio MCP + SQLite
-  serve --http-mcp        Run Local Basic daemon: HTTP MCP + SQLite
-  daemon start            Alias for serve --http-mcp
-  daemon status           Check local daemon health
-  doctor                  Check local setup
+  setup             Set up Tuskbase and generate local auth
+  start             Start the local Tuskbase daemon
+  status            Check whether Tuskbase is running
+  connect [client]  Print MCP setup for codex, claude, cursor, or generic
+  doctor            Check local setup
+  version           Print version info
+
+Advanced:
+  serve             Run stdio MCP directly
+  serve --http-mcp  Run HTTP MCP directly
+  auth show         Show auth status; use --reveal to print secrets
 
 Compatibility:
+  init                    Alias for setup guidance
+  init-mcp [client]       Alias for connect-style MCP config output
+  daemon start            Alias for start
+  daemon status           Alias for status
   -mode mcp|http|both     Legacy mode flag
+
+Environment:
+  TUSKBASE_CONFIG_PATH    Override the Tuskbase config file path
+  TUSKBASE_API_KEY        Manual bearer key for HTTP MCP and REST
+  TUSKBASE_AGENT_KEYS     Local Shared keys as name:role:key,name:role:key
 `)
 }

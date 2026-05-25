@@ -41,14 +41,14 @@ type StoreFactory interface {
 	Open(context.Context) (StoreBundle, error)
 }
 
-// AuthPolicy is deliberately small for now; Local Shared should add local API keys and agent identity behind this boundary.
+// AuthPolicy is deliberately small for now; Local Shared should add per-agent identity behind this boundary.
 type AuthPolicy interface {
 	WrapHTTP(http.Handler) http.Handler
 	Name() string
 }
 
 // NoAuthPolicy is acceptable for stdio and loopback experiments only.
-// TODO: replace this for Local Shared with per-agent identity, local API keys, and audit-friendly attribution.
+// TODO: replace this for Local Shared with per-agent identity and audit-friendly attribution.
 type NoAuthPolicy struct{}
 
 func (NoAuthPolicy) WrapHTTP(h http.Handler) http.Handler { return h }
