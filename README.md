@@ -8,7 +8,7 @@ Tuskbase helps coding agents share repo context and decision history before they
 
 Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
 
-> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
+> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, required local API-key auth for HTTP MCP/REST, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
 
 ## How It Works
 
@@ -31,19 +31,19 @@ Build or run the current Go command during development:
 
 ```bash
 go run ./cmd/tuskbase version
-go run ./cmd/tuskbase init
+go run ./cmd/tuskbase setup --print-only
 ```
 
-Demo mode is the fastest path for one local MCP client:
+Recommended first setup is Local Basic. Tuskbase generates a local secret and stores it in a private user config file:
 
 ```bash
-go run ./cmd/tuskbase serve
+go run ./cmd/tuskbase setup
 ```
 
-Local Basic mode runs one loopback daemon so multiple local MCP clients can share the same SQLite-backed memory:
+Start the local daemon after setup:
 
 ```bash
-go run ./cmd/tuskbase daemon start
+go run ./cmd/tuskbase start
 ```
 
 The Local Basic MCP endpoint is:
@@ -52,14 +52,17 @@ The Local Basic MCP endpoint is:
 http://127.0.0.1:8765/mcp
 ```
 
-Generate example MCP client config:
+Print client-specific MCP setup help:
 
 ```bash
-go run ./cmd/tuskbase init-mcp codex --mode demo
-go run ./cmd/tuskbase init-mcp codex --mode local-basic
+go run ./cmd/tuskbase connect codex
+go run ./cmd/tuskbase connect claude
+go run ./cmd/tuskbase connect cursor
 ```
 
-The REST API is optional and is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging:
+Manual environment-variable setup is still supported for developers and CI. See [.env.example](.env.example).
+
+The REST API is optional and is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging after setup:
 
 ```bash
 go run ./cmd/tuskbase serve --http-mcp --rest
