@@ -121,30 +121,45 @@ FROM decisions
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	var decisions []domain.Decision
 	for rows.Next() {
 		var d domain.Decision
 		var alternativesJSON, claimsJSON, evidenceJSON, relationshipsJSON string
 		if err := rows.Scan(&d.ID, &d.WorkspaceID, &alternativesJSON, &claimsJSON, &evidenceJSON, &relationshipsJSON); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if err := unmarshalJSON(alternativesJSON, &d.Alternatives); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if err := unmarshalJSON(claimsJSON, &d.Claims); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if err := unmarshalJSON(evidenceJSON, &d.Evidence); err != nil {
+			_ = rows.Close()
 			return err
 		}
 		if err := unmarshalJSON(relationshipsJSON, &d.Relationships); err != nil {
+			_ = rows.Close()
 			return err
 		}
+		decisions = append(decisions, d)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, d := range decisions {
 		if err := s.insertMissingDecisionChildren(ctx, d); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (s *Store) insertMissingDecisionChildren(ctx context.Context, d domain.Decision) error {
