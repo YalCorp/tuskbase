@@ -25,6 +25,94 @@ func TestOpenCreatesSchema(t *testing.T) {
 	}
 }
 
+func TestOpenBackfillsDecisionChildrenWithoutBlocking(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "tuskbase.db")
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	now := time.Now().UTC()
+	workspace := domain.Workspace{
+		ID:              "ws_backfill",
+		RepoRoot:        t.TempDir(),
+		DisplayName:     "backfill",
+		RepoFingerprint: "fingerprint",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if _, err := store.UpsertWorkspace(ctx, workspace); err != nil {
+		t.Fatalf("UpsertWorkspace() error = %v", err)
+	}
+	decision := domain.Decision{
+		ID:                "d_backfill",
+		WorkspaceID:       workspace.ID,
+		Actor:             domain.Actor{Kind: domain.ActorAgent},
+		Type:              "architecture",
+		Title:             "Keep decisions canonical",
+		Outcome:           "Store canonical decisions before derived child rows.",
+		Rationale:         "Backfill should keep older records readable.",
+		Confidence:        0.9,
+		Status:            domain.DecisionActive,
+		ValidFrom:         now,
+		TransactionTime:   now,
+		CompletenessScore: 0.5,
+		Alternatives:      []domain.Alternative{{ID: "a_backfill", DecisionID: "d_backfill", Title: "Skip backfill", Reason: "Would lose compatibility."}},
+		Claims:            []domain.Claim{{ID: "c_backfill", DecisionID: "d_backfill", Text: "Startup backfill must not block."}},
+		Evidence:          []domain.Evidence{{ID: "e_backfill", DecisionID: "d_backfill", Kind: "test", URI: "store_test.go", Snippet: "Regression coverage."}},
+		Relationships: []domain.DecisionRelationship{{
+			ID:             "r_backfill",
+			WorkspaceID:    workspace.ID,
+			FromDecisionID: "d_backfill",
+			ToDecisionID:   "prior_decision",
+			Type:           domain.RelationshipFollows,
+			Confidence:     0.9,
+		}},
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if err := store.SaveDecision(ctx, decision); err != nil {
+		t.Fatalf("SaveDecision() error = %v", err)
+	}
+	for _, stmt := range []string{
+		`DELETE FROM decision_relationships`,
+		`DELETE FROM decision_evidence`,
+		`DELETE FROM decision_claims`,
+		`DELETE FROM decision_alternatives`,
+	} {
+		if _, err := store.DB().ExecContext(ctx, stmt); err != nil {
+			t.Fatalf("%s failed: %v", stmt, err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	openCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	reopened, err := Open(openCtx, dbPath)
+	if err != nil {
+		t.Fatalf("Open() with child backfill error = %v", err)
+	}
+	defer reopened.Close()
+	for _, tc := range []struct {
+		name  string
+		query string
+	}{
+		{name: "alternatives", query: `SELECT count(*) FROM decision_alternatives WHERE decision_id = 'd_backfill'`},
+		{name: "claims", query: `SELECT count(*) FROM decision_claims WHERE decision_id = 'd_backfill'`},
+		{name: "evidence", query: `SELECT count(*) FROM decision_evidence WHERE decision_id = 'd_backfill'`},
+		{name: "relationships", query: `SELECT count(*) FROM decision_relationships WHERE from_decision_id = 'd_backfill'`},
+	} {
+		var count int
+		if err := reopened.DB().QueryRowContext(ctx, tc.query).Scan(&count); err != nil {
+			t.Fatalf("count %s: %v", tc.name, err)
+		}
+		if count != 1 {
+			t.Fatalf("%s count = %d, want 1", tc.name, count)
+		}
+	}
+}
 
 func TestSaveDecisionNormalizesChildrenAndSupersedes(t *testing.T) {
 	ctx := context.Background()
