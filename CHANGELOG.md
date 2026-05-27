@@ -6,6 +6,8 @@ This project follows a human-readable changelog style inspired by Keep a Changel
 
 ## [Unreleased]
 
+## [v0.2.1] - 2026-05-27
+
 ### Added
 
 - Added `.env.example` for manual local configuration.
