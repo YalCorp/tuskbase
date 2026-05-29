@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,33 +23,56 @@ const (
 	modeLocalBasic  = "local-basic"
 	modeLocalShared = "local-shared"
 	defaultAddr     = "127.0.0.1:8765"
+	configVersionV1 = 1
+	transportBridge = "bridge"
+	transportHTTP   = "http"
 )
 
+var supportedClients = []string{"codex", "claude", "cursor", "generic"}
+
 type userConfig struct {
-	Mode      string                  `json:"mode"`
-	Addr      string                  `json:"addr"`
-	DBPath    string                  `json:"db_path,omitempty"`
-	APIKey    string                  `json:"api_key,omitempty"`
-	AgentKeys []daemon.LocalSharedKey `json:"agent_keys,omitempty"`
-	UpdatedAt string                  `json:"updated_at"`
+	ConfigVersion int                     `json:"config_version"`
+	Mode          string                  `json:"mode"`
+	Addr          string                  `json:"addr"`
+	DBPath        string                  `json:"db_path,omitempty"`
+	APIKey        string                  `json:"api_key,omitempty"`
+	AgentKeys     []daemon.LocalSharedKey `json:"agent_keys,omitempty"`
+	UpdatedAt     string                  `json:"updated_at"`
+}
+
+func (cfg userConfig) HasAuth() bool {
+	return strings.TrimSpace(cfg.APIKey) != "" || len(cfg.AgentKeys) > 0
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) error {
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	mode := fs.String("mode", modeLocalBasic, "demo, local-basic, or local-shared")
-	clients := fs.String("client", "", "comma-separated clients to show after setup: codex, claude, cursor, or all")
+	clients := fs.String("client", "", "comma-separated clients to show after setup: codex, claude, cursor, generic, or all")
 	printOnly := fs.Bool("print-only", false, "print the planned setup without writing config")
 	reveal := fs.Bool("reveal", false, "show generated secrets in printed output")
+	transport := fs.String("transport", transportBridge, "MCP client transport to print/apply: bridge or http")
+	apply := fs.Bool("apply", false, "apply supported client config instead of only printing it")
 	yes := fs.Bool("yes", false, "accept defaults for non-interactive setup")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	_ = yes // The current setup only writes Tuskbase-owned config, so no external confirmation is needed.
 
+	selectedClients, err := parseClients(*clients)
+	if err != nil {
+		return err
+	}
 	selectedMode, err := normalizeMode(*mode)
 	if err != nil {
 		return err
+	}
+	selectedTransport, err := normalizeTransport(*transport)
+	if err != nil {
+		return err
+	}
+	if *printOnly && *apply {
+		return errors.New("use either --print-only or --apply, not both")
 	}
 	path, err := configPath()
 	if err != nil {
@@ -58,6 +82,7 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	cfg.ConfigVersion = configVersionV1
 	cfg.Mode = selectedMode
 	if strings.TrimSpace(cfg.Addr) == "" {
 		cfg.Addr = defaultAddr
@@ -83,12 +108,9 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		cfg.AgentKeys = nil
 	case modeLocalShared:
 		if len(cfg.AgentKeys) == 0 {
-			for _, client := range []string{"codex", "claude", "cursor"} {
-				key, err := generateSecret()
-				if err != nil {
-					return err
-				}
-				cfg.AgentKeys = append(cfg.AgentKeys, daemon.LocalSharedKey{Name: client, Role: "agent", Key: key})
+			cfg.AgentKeys, err = defaultLocalSharedKeys()
+			if err != nil {
+				return err
 			}
 			generatedSecret = true
 		}
@@ -124,9 +146,14 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	if *reveal {
 		printSecrets(stdout, cfg)
 	}
-	for _, client := range parseClients(*clients) {
+	for _, client := range selectedClients {
 		fmt.Fprintln(stdout)
-		printConnectConfig(stdout, client, cfg, *reveal)
+		printConnectConfig(stdout, client, cfg, selectedTransport, *reveal)
+		if *apply {
+			if err := applyConnectConfig(client, cfg, selectedTransport, stdout, stderr); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }
@@ -141,11 +168,17 @@ func runConnect(args []string, stdout, stderr io.Writer) error {
 	fs.SetOutput(stderr)
 	mode := fs.String("mode", "", "override setup mode for printed config: demo, local-basic, or local-shared")
 	reveal := fs.Bool("reveal", false, "include stored secrets in printed commands")
+	transport := fs.String("transport", transportBridge, "MCP client transport to print: bridge or http")
+	apply := fs.Bool("apply", false, "apply supported client config instead of only printing it")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if fs.NArg() > 0 {
 		client = fs.Arg(0)
+	}
+	client, err := canonicalClient(client)
+	if err != nil {
+		return err
 	}
 	cfg, found, err := loadUserConfig()
 	if err != nil {
@@ -153,6 +186,10 @@ func runConnect(args []string, stdout, stderr io.Writer) error {
 	}
 	if !found {
 		cfg = userConfig{Mode: modeLocalBasic, Addr: defaultAddr}
+	}
+	selectedTransport, err := normalizeTransport(*transport)
+	if err != nil {
+		return err
 	}
 	if *mode != "" {
 		cfg.Mode, err = normalizeMode(*mode)
@@ -163,41 +200,232 @@ func runConnect(args []string, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(cfg.Addr) == "" {
 		cfg.Addr = defaultAddr
 	}
-	printConnectConfig(stdout, client, cfg, *reveal)
+	printConnectConfig(stdout, client, cfg, selectedTransport, *reveal)
+	if *apply {
+		return applyConnectConfig(client, cfg, selectedTransport, stdout, stderr)
+	}
 	return nil
 }
 
 func runAuthCommand(args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(stdout, "Usage: tuskbase auth show --reveal")
+		fmt.Fprintln(stdout, "Usage: tuskbase auth <show|list|rotate|add|remove|set-role>")
 		return nil
 	}
 	switch args[0] {
-	case "show":
-		fs := flag.NewFlagSet("auth show", flag.ContinueOnError)
-		fs.SetOutput(stderr)
-		reveal := fs.Bool("reveal", false, "reveal stored local secrets")
-		if err := fs.Parse(args[1:]); err != nil {
-			return err
-		}
-		cfg, found, err := loadUserConfig()
-		if err != nil {
-			return err
-		}
-		if !found {
-			return errors.New("no Tuskbase setup found; run `tuskbase setup` first")
-		}
-		fmt.Fprintf(stdout, "mode: %s\n", cfg.Mode)
-		fmt.Fprintf(stdout, "auth_policy: %s\n", authPolicyName(cfg))
-		if *reveal {
-			printSecrets(stdout, cfg)
-		} else if cfg.Mode != modeDemo {
-			fmt.Fprintln(stdout, "secret: hidden; rerun with --reveal to show it")
-		}
-		return nil
+	case "show", "list":
+		return runAuthList(args[1:], stdout, stderr)
+	case "rotate":
+		return runAuthRotate(args[1:], stdout, stderr)
+	case "add":
+		return runAuthAdd(args[1:], stdout, stderr)
+	case "remove":
+		return runAuthRemove(args[1:], stdout, stderr)
+	case "set-role":
+		return runAuthSetRole(args[1:], stdout, stderr)
 	default:
 		return fmt.Errorf("unknown auth command %q", args[0])
 	}
+}
+
+func runAuthList(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	reveal := fs.Bool("reveal", false, "reveal stored local secrets")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, _, err := loadRequiredUserConfig()
+	if err != nil {
+		return err
+	}
+	printAuthSummary(stdout, cfg, *reveal)
+	return nil
+}
+
+func runAuthRotate(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth rotate", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	name := fs.String("name", "", "Local Shared key name to rotate")
+	all := fs.Bool("all", false, "rotate every Local Shared key")
+	yes := fs.Bool("yes", false, "accept rotation without prompting")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_ = yes
+	cfg, path, err := loadRequiredUserConfig()
+	if err != nil {
+		return err
+	}
+	rotated := []string{}
+	switch cfg.Mode {
+	case modeLocalBasic:
+		if *name != "" || *all {
+			return errors.New("Local Basic has one key; run `tuskbase auth rotate` without --name or --all")
+		}
+		key, err := generateSecret()
+		if err != nil {
+			return err
+		}
+		cfg.APIKey = key
+		rotated = append(rotated, "local-api-key")
+	case modeLocalShared:
+		if *name != "" && *all {
+			return errors.New("use either --name or --all, not both")
+		}
+		if *name == "" && !*all {
+			return errors.New("Local Shared rotation requires --name <key> or --all")
+		}
+		if *all {
+			for i := range cfg.AgentKeys {
+				key, err := generateSecret()
+				if err != nil {
+					return err
+				}
+				cfg.AgentKeys[i].Key = key
+				rotated = append(rotated, cfg.AgentKeys[i].Name)
+			}
+		} else {
+			keyName, err := validateKeyName(*name)
+			if err != nil {
+				return err
+			}
+			idx := findAgentKey(cfg.AgentKeys, keyName)
+			if idx < 0 {
+				return fmt.Errorf("local shared key %q not found", keyName)
+			}
+			key, err := generateSecret()
+			if err != nil {
+				return err
+			}
+			cfg.AgentKeys[idx].Key = key
+			rotated = append(rotated, keyName)
+		}
+	default:
+		return errors.New("auth rotate requires local-basic or local-shared setup")
+	}
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := saveUserConfig(path, cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "rotated: %s\n", strings.Join(rotated, ","))
+	return nil
+}
+
+func runAuthAdd(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth add", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	name := fs.String("name", "", "Local Shared key name")
+	role := fs.String("role", "agent", "reader, agent, or admin")
+	reveal := fs.Bool("reveal", false, "print the generated secret")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, path, err := loadRequiredUserConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != modeLocalShared {
+		return errors.New("auth add requires local-shared setup")
+	}
+	keyName, err := validateKeyName(*name)
+	if err != nil {
+		return err
+	}
+	if findAgentKey(cfg.AgentKeys, keyName) >= 0 {
+		return fmt.Errorf("local shared key %q already exists", keyName)
+	}
+	cleanRole, err := daemon.NormalizeLocalRole(*role)
+	if err != nil {
+		return err
+	}
+	secret, err := generateSecret()
+	if err != nil {
+		return err
+	}
+	cfg.AgentKeys = append(cfg.AgentKeys, daemon.LocalSharedKey{Name: keyName, Role: cleanRole, Key: secret})
+	sortAgentKeys(cfg.AgentKeys)
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := saveUserConfig(path, cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "added: %s role=%s\n", keyName, cleanRole)
+	if *reveal {
+		fmt.Fprintf(stdout, "%s:%s:%s\n", keyName, cleanRole, secret)
+	}
+	return nil
+}
+
+func runAuthRemove(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth remove", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	name := fs.String("name", "", "Local Shared key name")
+	yes := fs.Bool("yes", false, "accept removal without prompting")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	_ = yes
+	cfg, path, err := loadRequiredUserConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != modeLocalShared {
+		return errors.New("auth remove requires local-shared setup")
+	}
+	if len(cfg.AgentKeys) <= 1 {
+		return errors.New("cannot remove the final Local Shared key")
+	}
+	keyName, err := validateKeyName(*name)
+	if err != nil {
+		return err
+	}
+	idx := findAgentKey(cfg.AgentKeys, keyName)
+	if idx < 0 {
+		return fmt.Errorf("local shared key %q not found", keyName)
+	}
+	cfg.AgentKeys = append(cfg.AgentKeys[:idx], cfg.AgentKeys[idx+1:]...)
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := saveUserConfig(path, cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "removed: %s\n", keyName)
+	return nil
+}
+
+func runAuthSetRole(args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("auth set-role", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	name := fs.String("name", "", "Local Shared key name")
+	role := fs.String("role", "", "reader, agent, or admin")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	cfg, path, err := loadRequiredUserConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.Mode != modeLocalShared {
+		return errors.New("auth set-role requires local-shared setup")
+	}
+	keyName, err := validateKeyName(*name)
+	if err != nil {
+		return err
+	}
+	cleanRole, err := daemon.NormalizeLocalRole(*role)
+	if err != nil {
+		return err
+	}
+	idx := findAgentKey(cfg.AgentKeys, keyName)
+	if idx < 0 {
+		return fmt.Errorf("local shared key %q not found", keyName)
+	}
+	cfg.AgentKeys[idx].Role = cleanRole
+	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	if err := saveUserConfig(path, cfg); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "updated: %s role=%s\n", keyName, cleanRole)
+	return nil
 }
 
 func normalizeMode(mode string) (string, error) {
@@ -213,68 +441,159 @@ func normalizeMode(mode string) (string, error) {
 	}
 }
 
-func parseClients(raw string) []string {
+func parseClients(raw string) ([]string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
-		return nil
+		return nil, nil
 	}
 	if strings.EqualFold(raw, "all") {
-		return []string{"codex", "claude", "cursor"}
+		return []string{"codex", "claude", "cursor"}, nil
 	}
 	parts := strings.Split(raw, ",")
 	clients := make([]string, 0, len(parts))
 	for _, part := range parts {
-		client := strings.ToLower(strings.TrimSpace(part))
-		if client != "" {
-			clients = append(clients, client)
+		client, err := canonicalClient(part)
+		if err != nil {
+			return nil, err
 		}
+		clients = append(clients, client)
 	}
-	return clients
+	return clients, nil
 }
 
-func printConnectConfig(w io.Writer, client string, cfg userConfig, reveal bool) {
+func normalizeTransport(transport string) (string, error) {
+	transport = strings.ToLower(strings.TrimSpace(transport))
+	switch transport {
+	case "", transportBridge:
+		return transportBridge, nil
+	case transportHTTP, "streamable-http":
+		return transportHTTP, nil
+	default:
+		return "", fmt.Errorf("unknown transport %q; expected bridge or http", transport)
+	}
+}
+
+func canonicalClient(client string) (string, error) {
 	client = strings.ToLower(strings.TrimSpace(client))
 	if client == "" {
-		client = "generic"
+		return "generic", nil
 	}
-	url := "http://" + cfg.Addr + "/mcp"
-	token := tokenForClient(cfg, client, reveal)
+	if client == "claude-code" {
+		return "claude", nil
+	}
+	for _, supported := range supportedClients {
+		if client == supported {
+			return client, nil
+		}
+	}
+	return "", fmt.Errorf("unsupported client %q; supported clients: %s", client, strings.Join(supportedClients, ", "))
+}
+
+func printConnectConfig(w io.Writer, client string, cfg userConfig, transport string, reveal bool) {
+	client, err := canonicalClient(client)
+	if err != nil {
+		fmt.Fprintf(w, "%s\n", err)
+		return
+	}
+	transport, err = normalizeTransport(transport)
+	if err != nil {
+		fmt.Fprintf(w, "%s\n", err)
+		return
+	}
+	if cfg.Mode == modeDemo {
+		printStdioConfig(w, client, []string{"serve"})
+		return
+	}
+	if transport == transportBridge {
+		if cfg.Mode != modeDemo {
+			fmt.Fprintf(w, "# Tuskbase bridge keeps bearer tokens in Tuskbase-owned local config.\n")
+		}
+		bridgeClient := bridgeClientName(cfg, client)
+		printStdioConfig(w, client, []string{"bridge", "--client", bridgeClient})
+		return
+	}
+	printHTTPConnectConfig(w, client, cfg, reveal)
+}
+
+func printStdioConfig(w io.Writer, client string, args []string) {
 	switch client {
 	case "codex":
 		fmt.Fprintf(w, "# Codex MCP config\n")
-		if cfg.Mode == modeDemo {
-			fmt.Fprintf(w, "codex mcp add tuskbase -- tuskbase serve\n")
-			return
+		fmt.Fprintf(w, "codex mcp add tuskbase -- tuskbase")
+		for _, arg := range args {
+			fmt.Fprintf(w, " %s", shellWord(arg))
 		}
-		fmt.Fprintf(w, "codex mcp add tuskbase --url %s --bearer-token-env-var TUSKBASE_API_KEY\n", url)
-		fmt.Fprintf(w, "# Codex reads the bearer token from TUSKBASE_API_KEY.\n")
-		if reveal && token != "" {
-			fmt.Fprintf(w, "export TUSKBASE_API_KEY=%s\n", token)
-		} else {
-			fmt.Fprintf(w, "# Run `tuskbase auth show --reveal` if you need to copy the token.\n")
-		}
-	case "claude", "claude-code":
+		fmt.Fprintf(w, "\n")
+	case "claude":
 		fmt.Fprintf(w, "# Claude Code MCP config\n")
-		if cfg.Mode == modeDemo {
-			fmt.Fprintf(w, "claude mcp add --transport stdio tuskbase -- tuskbase serve\n")
-			return
+		fmt.Fprintf(w, "claude mcp add --transport stdio tuskbase -- tuskbase")
+		for _, arg := range args {
+			fmt.Fprintf(w, " %s", shellWord(arg))
 		}
-		fmt.Fprintf(w, "claude mcp add --transport http tuskbase %s --header \"Authorization: Bearer %s\"\n", url, token)
+		fmt.Fprintf(w, "\n")
 	case "cursor":
 		fmt.Fprintf(w, "# Cursor MCP config (~/.cursor/mcp.json)\n")
-		if cfg.Mode == modeDemo {
-			fmt.Fprintf(w, "{\n  \"mcpServers\": {\n    \"tuskbase\": {\n      \"command\": \"tuskbase\",\n      \"args\": [\"serve\"]\n    }\n  }\n}\n")
-			return
+		fmt.Fprintf(w, "{\n  \"mcpServers\": {\n    \"tuskbase\": {\n      \"command\": \"tuskbase\",\n      \"args\": %s\n    }\n  }\n}\n", jsonArray(args))
+	default:
+		fmt.Fprintf(w, "# Generic stdio MCP config\n")
+		fmt.Fprintf(w, "command: tuskbase\nargs: %s\n", jsonArray(args))
+	}
+}
+
+func printHTTPConnectConfig(w io.Writer, client string, cfg userConfig, reveal bool) {
+	url := "http://" + cfg.Addr + "/mcp"
+	token := tokenForClient(cfg, client, reveal)
+	fmt.Fprintf(w, "# Authenticated HTTP clients can omit actor; Tuskbase derives it from the bearer token.\n")
+	switch client {
+	case "codex":
+		envVar := tokenEnvVar(cfg, client)
+		fmt.Fprintf(w, "# Codex HTTP MCP config\n")
+		fmt.Fprintf(w, "codex mcp add tuskbase --url %s --bearer-token-env-var %s\n", url, envVar)
+		fmt.Fprintf(w, "# Codex reads the bearer token from %s. Prefer bridge transport for local setup.\n", envVar)
+		if reveal && token != "" {
+			fmt.Fprintf(w, "export %s=%s\n", envVar, token)
+		} else {
+			fmt.Fprintf(w, "# Run `tuskbase auth list --reveal` if you need to copy the token.\n")
 		}
+	case "claude":
+		fmt.Fprintf(w, "# Claude Code HTTP MCP config\n")
+		fmt.Fprintf(w, "claude mcp add --transport http tuskbase %s --header \"Authorization: Bearer %s\"\n", url, token)
+	case "cursor":
+		fmt.Fprintf(w, "# Cursor HTTP MCP config (~/.cursor/mcp.json)\n")
 		fmt.Fprintf(w, "{\n  \"mcpServers\": {\n    \"tuskbase\": {\n      \"type\": \"streamable-http\",\n      \"url\": %q,\n      \"headers\": {\n        \"Authorization\": \"Bearer %s\"\n      }\n    }\n  }\n}\n", url, token)
 	default:
 		fmt.Fprintf(w, "# Generic HTTP MCP config\n")
-		if cfg.Mode == modeDemo {
-			fmt.Fprintf(w, "command: tuskbase\nargs: [\"serve\"]\n")
-			return
-		}
 		fmt.Fprintf(w, "url: %s\nAuthorization: Bearer %s\n", url, token)
 	}
+}
+
+func bridgeClientName(cfg userConfig, client string) string {
+	if cfg.Mode == modeLocalShared && client == "generic" {
+		return "<key-name>"
+	}
+	return client
+}
+
+func jsonArray(values []string) string {
+	data, err := json.Marshal(values)
+	if err != nil {
+		return "[]"
+	}
+	return string(data)
+}
+
+func shellWord(value string) string {
+	if strings.ContainsAny(value, " \t\n\r\"'") {
+		return fmt.Sprintf("%q", value)
+	}
+	return value
+}
+
+func tokenEnvVar(cfg userConfig, client string) string {
+	if cfg.Mode == modeLocalShared && client != "generic" {
+		return "TUSKBASE_" + strings.ToUpper(strings.ReplaceAll(client, "-", "_")) + "_KEY"
+	}
+	return "TUSKBASE_API_KEY"
 }
 
 func tokenForClient(cfg userConfig, client string, reveal bool) string {
@@ -287,11 +606,34 @@ func tokenForClient(cfg userConfig, client string, reveal bool) string {
 				return "<" + key.Name + "-key>"
 			}
 		}
+		if client == "generic" {
+			return "<local-shared-key>"
+		}
 	}
 	if reveal && cfg.APIKey != "" {
 		return cfg.APIKey
 	}
 	return "<tuskbase-key>"
+}
+
+func printAuthSummary(w io.Writer, cfg userConfig, reveal bool) {
+	fmt.Fprintf(w, "mode: %s\n", cfg.Mode)
+	fmt.Fprintf(w, "auth_policy: %s\n", authPolicyName(cfg))
+	if cfg.Mode != modeDemo {
+		fmt.Fprintf(w, "auth_source: config\n")
+	}
+	switch cfg.Mode {
+	case modeLocalBasic:
+		fmt.Fprintf(w, "local-api-key role=agent key=%s\n", secretForPrint(cfg.APIKey, reveal))
+	case modeLocalShared:
+		keys := append([]daemon.LocalSharedKey(nil), cfg.AgentKeys...)
+		sortAgentKeys(keys)
+		for _, key := range keys {
+			fmt.Fprintf(w, "%s role=%s key=%s\n", key.Name, key.Role, secretForPrint(key.Key, reveal))
+		}
+	default:
+		fmt.Fprintf(w, "secret: none\n")
+	}
 }
 
 func printSecrets(w io.Writer, cfg userConfig) {
@@ -308,6 +650,13 @@ func printSecrets(w io.Writer, cfg userConfig) {
 	}
 }
 
+func secretForPrint(secret string, reveal bool) string {
+	if reveal {
+		return secret
+	}
+	return "<hidden>"
+}
+
 func authPolicyName(cfg userConfig) string {
 	if len(cfg.AgentKeys) > 0 {
 		return "local-shared-keys"
@@ -318,12 +667,80 @@ func authPolicyName(cfg userConfig) string {
 	return "none"
 }
 
+func defaultLocalSharedKeys() ([]daemon.LocalSharedKey, error) {
+	keys := make([]daemon.LocalSharedKey, 0, 3)
+	for _, client := range []string{"codex", "claude", "cursor"} {
+		key, err := generateSecret()
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, daemon.LocalSharedKey{Name: client, Role: "agent", Key: key})
+	}
+	return keys, nil
+}
+
 func generateSecret() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {
 		return "", err
 	}
 	return "tbk_" + base64.RawURLEncoding.EncodeToString(buf), nil
+}
+
+func validateKeyName(name string) (string, error) {
+	name = strings.ToLower(strings.TrimSpace(name))
+	if name == "" {
+		return "", errors.New("local shared key name is required")
+	}
+	if strings.ContainsAny(name, ",:\t\n\r ") {
+		return "", fmt.Errorf("local shared key name %q cannot contain whitespace, comma, or colon", name)
+	}
+	return name, nil
+}
+
+func findAgentKey(keys []daemon.LocalSharedKey, name string) int {
+	for i, key := range keys {
+		if strings.EqualFold(key.Name, name) {
+			return i
+		}
+	}
+	return -1
+}
+
+func sortAgentKeys(keys []daemon.LocalSharedKey) {
+	sort.SliceStable(keys, func(i, j int) bool {
+		return keys[i].Name < keys[j].Name
+	})
+}
+
+func applyConnectConfig(client string, cfg userConfig, transport string, stdout, stderr io.Writer) error {
+	client, err := canonicalClient(client)
+	if err != nil {
+		return err
+	}
+	transport, err = normalizeTransport(transport)
+	if err != nil {
+		return err
+	}
+	if client != "codex" {
+		return fmt.Errorf("--apply currently supports codex only; printed %s config instead", client)
+	}
+	args := []string{"mcp", "add", "tuskbase"}
+	if cfg.Mode == modeDemo {
+		args = append(args, "--", "tuskbase", "serve")
+	} else if transport == transportBridge {
+		args = append(args, "--", "tuskbase", "bridge", "--client", bridgeClientName(cfg, client))
+	} else {
+		args = append(args, "--url", "http://"+cfg.Addr+"/mcp", "--bearer-token-env-var", tokenEnvVar(cfg, client))
+	}
+	cmd := exec.Command("codex", args...)
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("apply codex MCP config: %w", err)
+	}
+	fmt.Fprintf(stdout, "apply: codex ok\n")
+	return nil
 }
 
 func configPath() (string, error) {
@@ -337,15 +754,34 @@ func configPath() (string, error) {
 	return filepath.Join(root, "tuskbase", "config.json"), nil
 }
 
+func loadRequiredUserConfig() (userConfig, string, error) {
+	path, err := configPath()
+	if err != nil {
+		return userConfig{}, "", err
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		return userConfig{}, "", err
+	}
+	if !found {
+		return userConfig{}, "", errors.New("no Tuskbase setup found; run `tuskbase setup` first")
+	}
+	return cfg, path, nil
+}
+
 func loadUserConfig() (userConfig, bool, error) {
 	path, err := configPath()
 	if err != nil {
 		return userConfig{}, false, err
 	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
+	found, err := repairConfigFileMode(path)
+	if err != nil {
+		return userConfig{}, false, err
+	}
+	if !found {
 		return userConfig{}, false, nil
 	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return userConfig{}, false, err
 	}
@@ -353,10 +789,19 @@ func loadUserConfig() (userConfig, bool, error) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return userConfig{}, false, err
 	}
+	if cfg.ConfigVersion == 0 {
+		cfg.ConfigVersion = configVersionV1
+	}
 	return cfg, true, nil
 }
 
 func saveUserConfig(path string, cfg userConfig) error {
+	if cfg.ConfigVersion == 0 {
+		cfg.ConfigVersion = configVersionV1
+	}
+	if err := rejectConfigSymlink(path); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -365,5 +810,41 @@ func saveUserConfig(path string, cfg userConfig) error {
 		return err
 	}
 	data = append(data, '\n')
-	return os.WriteFile(path, data, 0o600)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func repairConfigFileMode(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refusing to read symlinked Tuskbase config %s", path)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(path, 0o600); err != nil {
+			return false, fmt.Errorf("repair config permissions: %w", err)
+		}
+	}
+	return true, nil
+}
+
+func rejectConfigSymlink(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("refusing to write symlinked Tuskbase config %s", path)
+	}
+	return nil
 }

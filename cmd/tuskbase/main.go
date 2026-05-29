@@ -56,6 +56,8 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runDaemonStatus(args[1:], stdout, stderr)
 	case "connect":
 		return runConnect(args[1:], stdout, stderr)
+	case "bridge":
+		return runBridge(ctx, args[1:], stdout, stderr)
 	case "auth":
 		return runAuthCommand(args[1:], stdout, stderr)
 	case "serve":
@@ -158,11 +160,13 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	fmt.Fprintf(stdout, "addr: %s\n", *addr)
 	fmt.Fprintf(stdout, "mcp: ok\n")
 	fmt.Fprintf(stdout, "auth_policy: %s\n", cfg.Auth.Name())
+	fmt.Fprintf(stdout, "auth_source: %s\n", cfg.Auth.Source())
 	if strings.EqualFold(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER"), "openai") && strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
 		fmt.Fprintf(stdout, "openai: missing OPENAI_API_KEY\n")
 	} else {
 		fmt.Fprintf(stdout, "openai: ok or disabled\n")
 	}
+	fmt.Fprintf(stdout, "clients: codex, claude, cursor, generic (print with `tuskbase connect <client>`)\n")
 	return nil
 }
 
@@ -276,26 +280,42 @@ func loadAuthPolicy(required bool) (daemon.AuthPolicy, error) {
 		if err != nil {
 			return nil, err
 		}
-		return daemon.NewLocalSharedKeyPolicy(keys)
+		return daemon.NewLocalSharedKeyPolicyWithSource(keys, "env:TUSKBASE_AGENT_KEYS")
 	}
 	key := strings.TrimSpace(os.Getenv("TUSKBASE_API_KEY"))
 	if key != "" {
-		return daemon.NewLocalAPIKeyPolicy(key)
+		return daemon.NewLocalAPIKeyPolicyWithSource(key, "env:TUSKBASE_API_KEY")
 	}
 	if cfg, found, err := loadUserConfig(); err != nil {
 		return nil, err
 	} else if found {
-		if len(cfg.AgentKeys) > 0 {
-			return daemon.NewLocalSharedKeyPolicy(cfg.AgentKeys)
-		}
-		if strings.TrimSpace(cfg.APIKey) != "" {
-			return daemon.NewLocalAPIKeyPolicy(cfg.APIKey)
+		if cfg.HasAuth() {
+			return daemon.NewDynamicAuthPolicy("config", func(ctx context.Context) (daemon.AuthPolicy, error) {
+				latest, found, err := loadUserConfig()
+				if err != nil {
+					return nil, err
+				}
+				if !found {
+					return nil, errors.New("Tuskbase config disappeared; run `tuskbase setup`")
+				}
+				return authPolicyFromConfig(latest)
+			})
 		}
 	}
 	if required {
 		return nil, errors.New("HTTP MCP and REST require auth; run `tuskbase setup` or set TUSKBASE_API_KEY")
 	}
 	return daemon.NoAuthPolicy{}, nil
+}
+
+func authPolicyFromConfig(cfg userConfig) (daemon.AuthPolicy, error) {
+	if len(cfg.AgentKeys) > 0 {
+		return daemon.NewLocalSharedKeyPolicyWithSource(cfg.AgentKeys, "config")
+	}
+	if strings.TrimSpace(cfg.APIKey) != "" {
+		return daemon.NewLocalAPIKeyPolicyWithSource(cfg.APIKey, "config")
+	}
+	return nil, errors.New("Tuskbase config has no auth keys; run `tuskbase setup`")
 }
 
 func defaultDBPath() string {
@@ -385,13 +405,16 @@ Commands:
   start             Start the local Tuskbase daemon
   status            Check whether Tuskbase is running
   connect [client]  Print MCP setup for codex, claude, cursor, or generic
+  bridge            Run stdio MCP bridge with Tuskbase-managed local auth
   doctor            Check local setup
   version           Print version info
 
 Advanced:
   serve             Run stdio MCP directly
   serve --http-mcp  Run HTTP MCP directly
-  auth show         Show auth status; use --reveal to print secrets
+  auth list         Show local auth keys; use --reveal to print secrets
+  auth rotate       Rotate Local Basic or Local Shared keys
+  auth add/remove   Manage Local Shared named keys
 
 Compatibility:
   init                    Alias for setup guidance

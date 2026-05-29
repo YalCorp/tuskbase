@@ -47,7 +47,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.service.Attach(r.Context(), in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -61,7 +61,7 @@ func (s *Server) remember(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.service.Remember(r.Context(), in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, out)
@@ -75,7 +75,7 @@ func (s *Server) lookup(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.service.Lookup(r.Context(), in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -89,7 +89,7 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 	}
 	out, err := s.service.Preflight(r.Context(), in)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -103,7 +103,7 @@ func (s *Server) recent(w http.ResponseWriter, r *http.Request) {
 	}
 	decisions, err := s.service.Recent(r.Context(), r.PathValue("id"), limit)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"decisions": decisions})
@@ -112,7 +112,7 @@ func (s *Server) recent(w http.ResponseWriter, r *http.Request) {
 func (s *Server) conflicts(w http.ResponseWriter, r *http.Request) {
 	conflicts, err := s.service.Conflicts(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeError(w, http.StatusBadRequest, err)
+		writeServiceError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"conflicts": conflicts})
@@ -132,6 +132,14 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeServiceError(w http.ResponseWriter, err error) {
+	if errors.Is(err, app.ErrForbidden) {
+		writeError(w, http.StatusForbidden, err)
+		return
+	}
+	writeError(w, http.StatusBadRequest, err)
 }
 
 func writeError(w http.ResponseWriter, status int, err error) {

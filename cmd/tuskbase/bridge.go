@@ -1,0 +1,190 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+type ClientCredential struct {
+	Token  string
+	Source string
+}
+
+// CredentialProvider is the client-side auth seam. Local Basic, Local Shared,
+// and future Hosted auth should plug in here instead of changing bridge logic.
+type CredentialProvider interface {
+	Credential(context.Context, string) (ClientCredential, error)
+}
+
+type ConfigCredentialProvider struct {
+	load func() (userConfig, bool, error)
+}
+
+func NewConfigCredentialProvider(load func() (userConfig, bool, error)) ConfigCredentialProvider {
+	return ConfigCredentialProvider{load: load}
+}
+
+func (p ConfigCredentialProvider) Credential(ctx context.Context, client string) (ClientCredential, error) {
+	if p.load == nil {
+		return ClientCredential{}, errors.New("credential config loader is required")
+	}
+	cfg, found, err := p.load()
+	if err != nil {
+		return ClientCredential{}, err
+	}
+	if !found {
+		return ClientCredential{}, errors.New("no Tuskbase setup found; run `tuskbase setup` first")
+	}
+	profile, err := AuthProfileForConfig(cfg)
+	if err != nil {
+		return ClientCredential{}, err
+	}
+	return profile.Credential(ctx, client)
+}
+
+type AuthProfile interface {
+	Credential(context.Context, string) (ClientCredential, error)
+}
+
+type LocalBasicProfile struct {
+	key string
+}
+
+func (p LocalBasicProfile) Credential(context.Context, string) (ClientCredential, error) {
+	if strings.TrimSpace(p.key) == "" {
+		return ClientCredential{}, errors.New("Local Basic key is missing; run `tuskbase setup --mode local-basic`")
+	}
+	return ClientCredential{Token: strings.TrimSpace(p.key), Source: "config:local-basic"}, nil
+}
+
+type LocalSharedProfile struct {
+	keys []localSharedCredential
+}
+
+type localSharedCredential struct {
+	Name string
+	Key  string
+}
+
+func (p LocalSharedProfile) Credential(ctx context.Context, client string) (ClientCredential, error) {
+	client, err := validateKeyName(client)
+	if err != nil {
+		return ClientCredential{}, err
+	}
+	for _, key := range p.keys {
+		if strings.EqualFold(key.Name, client) {
+			return ClientCredential{Token: strings.TrimSpace(key.Key), Source: "config:local-shared:" + key.Name}, nil
+		}
+	}
+	return ClientCredential{}, fmt.Errorf("Local Shared key %q is missing; run `tuskbase auth add --name %s --role agent`", client, client)
+}
+
+type HostedProfile struct{}
+
+func (HostedProfile) Credential(context.Context, string) (ClientCredential, error) {
+	// TODO(hosted-auth): resolve hosted credentials from OS keychain/OAuth without
+	// changing the bridge transport or MCP client setup shape.
+	return ClientCredential{}, errors.New("Hosted auth is not implemented yet")
+}
+
+func AuthProfileForConfig(cfg userConfig) (AuthProfile, error) {
+	switch cfg.Mode {
+	case modeLocalBasic, "":
+		return LocalBasicProfile{key: cfg.APIKey}, nil
+	case modeLocalShared:
+		keys := make([]localSharedCredential, 0, len(cfg.AgentKeys))
+		for _, key := range cfg.AgentKeys {
+			keys = append(keys, localSharedCredential{Name: key.Name, Key: key.Key})
+		}
+		return LocalSharedProfile{keys: keys}, nil
+	case modeDemo:
+		return nil, errors.New("demo mode does not need bridge auth; use `tuskbase serve`")
+	case "hosted":
+		return HostedProfile{}, nil
+	default:
+		return nil, fmt.Errorf("unsupported auth profile %q", cfg.Mode)
+	}
+}
+
+func runBridge(ctx context.Context, args []string, stdout, stderr io.Writer) error {
+	fs := flag.NewFlagSet("bridge", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	client := fs.String("client", "generic", "client key name to use for Local Shared attribution")
+	addr := fs.String("addr", configuredAddr(), "daemon address")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	clientName, err := validateKeyName(*client)
+	if err != nil {
+		return err
+	}
+	server, closeRemote, err := newBridgeServer(ctx, "http://"+*addr+"/mcp", NewConfigCredentialProvider(loadUserConfig), clientName)
+	if err != nil {
+		return err
+	}
+	defer closeRemote()
+	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+func newBridgeServer(ctx context.Context, endpoint string, credentials CredentialProvider, clientName string) (*mcp.Server, func() error, error) {
+	session, err := connectBridgeRemote(ctx, endpoint, credentials, clientName)
+	if err != nil {
+		return nil, nil, err
+	}
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		session.Close()
+		return nil, nil, fmt.Errorf("list daemon MCP tools: %w", err)
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "tuskbase-bridge", Version: version}, nil)
+	for _, remote := range tools.Tools {
+		if remote == nil {
+			continue
+		}
+		tool := *remote
+		server.AddTool(&tool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			return session.CallTool(ctx, &mcp.CallToolParams{Name: req.Params.Name, Arguments: req.Params.Arguments})
+		})
+	}
+	return server, session.Close, nil
+}
+
+func connectBridgeRemote(ctx context.Context, endpoint string, credentials CredentialProvider, clientName string) (*mcp.ClientSession, error) {
+	client := mcp.NewClient(&mcp.Implementation{Name: "tuskbase-bridge", Version: version}, nil)
+	session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+		Endpoint:             endpoint,
+		HTTPClient:           &http.Client{Transport: bridgeBearerTransport{credentials: credentials, clientName: clientName}},
+		DisableStandaloneSSE: true,
+	}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("connect to Tuskbase daemon at %s: %w; run `tuskbase start` first", endpoint, err)
+	}
+	return session, nil
+}
+
+type bridgeBearerTransport struct {
+	credentials CredentialProvider
+	clientName  string
+	base        http.RoundTripper
+}
+
+func (t bridgeBearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	credential, err := t.credentials.Credential(req.Context(), t.clientName)
+	if err != nil {
+		return nil, err
+	}
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Authorization", "Bearer "+credential.Token)
+	return base.RoundTrip(clone)
+}

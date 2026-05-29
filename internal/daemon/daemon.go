@@ -41,18 +41,59 @@ type StoreFactory interface {
 	Open(context.Context) (StoreBundle, error)
 }
 
-// AuthPolicy is deliberately small for now; Local Shared should add per-agent identity behind this boundary.
+// AuthPolicy keeps transport auth replaceable while exposing a generic app principal to handlers.
 type AuthPolicy interface {
 	WrapHTTP(http.Handler) http.Handler
 	Name() string
+	Source() string
 }
 
-// NoAuthPolicy is acceptable for stdio and loopback experiments only.
-// TODO: replace this for Local Shared with per-agent identity and audit-friendly attribution.
+// NoAuthPolicy is acceptable for stdio Demo mode only; HTTP daemon modes should use an authenticated principal.
 type NoAuthPolicy struct{}
 
 func (NoAuthPolicy) WrapHTTP(h http.Handler) http.Handler { return h }
 func (NoAuthPolicy) Name() string                         { return "none" }
+func (NoAuthPolicy) Source() string                       { return "none" }
+
+// AuthPolicyLoader lets Local Basic, Local Shared, and future Hosted auth refresh
+// credentials without changing the daemon or application use cases.
+type AuthPolicyLoader func(context.Context) (AuthPolicy, error)
+
+type DynamicAuthPolicy struct {
+	source string
+	load   AuthPolicyLoader
+}
+
+func NewDynamicAuthPolicy(source string, load AuthPolicyLoader) (DynamicAuthPolicy, error) {
+	if load == nil {
+		return DynamicAuthPolicy{}, errors.New("dynamic auth loader is required")
+	}
+	if source == "" {
+		source = "dynamic"
+	}
+	return DynamicAuthPolicy{source: source, load: load}, nil
+}
+
+func (p DynamicAuthPolicy) WrapHTTP(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		policy, err := p.load(r.Context())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+		policy.WrapHTTP(h).ServeHTTP(w, r)
+	})
+}
+
+func (p DynamicAuthPolicy) Name() string {
+	policy, err := p.load(context.Background())
+	if err != nil {
+		return "unavailable"
+	}
+	return policy.Name()
+}
+
+func (p DynamicAuthPolicy) Source() string { return p.source }
 
 type Health struct {
 	Status     string `json:"status"`
@@ -60,6 +101,7 @@ type Health struct {
 	MCP        bool   `json:"mcp"`
 	REST       bool   `json:"rest"`
 	AuthPolicy string `json:"auth_policy"`
+	AuthSource string `json:"auth_source,omitempty"`
 }
 
 type TuskbaseDaemon struct {
@@ -111,7 +153,7 @@ func (d *TuskbaseDaemon) MCPServer() *mcp.Server { return d.mcp }
 func (d *TuskbaseDaemon) Handler() http.Handler  { return d.handler }
 
 func (d *TuskbaseDaemon) Health() Health {
-	return Health{Status: "ok", Store: d.bundle.Name, MCP: d.cfg.EnableMCP, REST: d.cfg.EnableREST, AuthPolicy: d.auth.Name()}
+	return Health{Status: "ok", Store: d.bundle.Name, MCP: d.cfg.EnableMCP, REST: d.cfg.EnableREST, AuthPolicy: d.auth.Name(), AuthSource: d.auth.Source()}
 }
 
 func (d *TuskbaseDaemon) RunStdio(ctx context.Context) error {

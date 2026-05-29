@@ -56,6 +56,9 @@ type AttachOutput struct {
 }
 
 func (s *Service) Attach(ctx context.Context, in AttachInput) (AttachOutput, error) {
+	if err := RequireWrite(ctx); err != nil {
+		return AttachOutput{}, err
+	}
 	if strings.TrimSpace(in.RepoPath) == "" {
 		return AttachOutput{}, errors.New("repo_path is required")
 	}
@@ -108,7 +111,7 @@ func (s *Service) Attach(ctx context.Context, in AttachInput) (AttachOutput, err
 
 type RememberInput struct {
 	WorkspaceID   string                        `json:"workspace_id"`
-	Actor         domain.Actor                  `json:"actor"`
+	Actor         domain.Actor                  `json:"actor,omitempty"`
 	Type          string                        `json:"type"`
 	Title         string                        `json:"title"`
 	Outcome       string                        `json:"outcome"`
@@ -134,6 +137,13 @@ type RememberOutput struct {
 
 // Remember stores the canonical decision first, then updates derived indexes. A retrieval failure should not erase the decision trail.
 func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutput, error) {
+	if err := RequireWrite(ctx); err != nil {
+		return RememberOutput{}, err
+	}
+	actor, err := ApplyPrincipalActor(ctx, in.Actor)
+	if err != nil {
+		return RememberOutput{}, err
+	}
 	status, err := domain.ParseDecisionStatus(string(in.Status))
 	if err != nil {
 		return RememberOutput{}, err
@@ -146,7 +156,7 @@ func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutpu
 	decision := domain.Decision{
 		ID:              s.ids.NewID(),
 		WorkspaceID:     strings.TrimSpace(in.WorkspaceID),
-		Actor:           in.Actor,
+		Actor:           actor,
 		Type:            strings.TrimSpace(in.Type),
 		Title:           strings.TrimSpace(in.Title),
 		Outcome:         strings.TrimSpace(in.Outcome),
@@ -247,6 +257,9 @@ type LookupOutput struct {
 }
 
 func (s *Service) Lookup(ctx context.Context, in LookupInput) (LookupOutput, error) {
+	if err := RequireRead(ctx); err != nil {
+		return LookupOutput{}, err
+	}
 	workspaceID := strings.TrimSpace(in.WorkspaceID)
 	query := strings.TrimSpace(in.Query)
 	if workspaceID == "" {
@@ -297,6 +310,9 @@ type DecisionProposalRelation struct {
 }
 
 func (s *Service) Preflight(ctx context.Context, in PreflightInput) (PreflightOutput, error) {
+	if err := RequireWrite(ctx); err != nil {
+		return PreflightOutput{}, err
+	}
 	workspaceID := strings.TrimSpace(in.WorkspaceID)
 	if strings.TrimSpace(in.Proposal) == "" {
 		return PreflightOutput{}, errors.New("proposal is required")
@@ -353,6 +369,9 @@ func (s *Service) Preflight(ctx context.Context, in PreflightInput) (PreflightOu
 }
 
 func (s *Service) Recent(ctx context.Context, workspaceID string, limit int) ([]domain.Decision, error) {
+	if err := RequireRead(ctx); err != nil {
+		return nil, err
+	}
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
 		return nil, errors.New("workspace_id is required")
@@ -364,6 +383,9 @@ func (s *Service) Recent(ctx context.Context, workspaceID string, limit int) ([]
 }
 
 func (s *Service) Conflicts(ctx context.Context, workspaceID string) ([]domain.Conflict, error) {
+	if err := RequireRead(ctx); err != nil {
+		return nil, err
+	}
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
 		return nil, errors.New("workspace_id is required")
