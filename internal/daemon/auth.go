@@ -11,27 +11,36 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
+
+	"github.com/priyavratuniyal/tuskbase/internal/app"
+	"github.com/priyavratuniyal/tuskbase/internal/domain"
 )
 
 const (
 	localAPIKeyScope = "tuskbase"
-	roleReader       = "reader"
-	roleAgent        = "agent"
-	roleAdmin        = "admin"
+	roleReader       = string(app.RoleReader)
+	roleAgent        = string(app.RoleAgent)
+	roleAdmin        = string(app.RoleAdmin)
 )
 
 // LocalAPIKeyPolicy protects HTTP transports with a single local bearer token.
-// It is intentionally small: Local Shared should use named keys instead.
+// Local Basic intentionally keeps this coarse identity; Local Shared should use
+// named local keys when per-client attribution matters.
 type LocalAPIKeyPolicy struct {
-	key string
+	key    string
+	source string
 }
 
 func NewLocalAPIKeyPolicy(key string) (LocalAPIKeyPolicy, error) {
+	return NewLocalAPIKeyPolicyWithSource(key, "manual")
+}
+
+func NewLocalAPIKeyPolicyWithSource(key, source string) (LocalAPIKeyPolicy, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return LocalAPIKeyPolicy{}, errors.New("local API key is required")
 	}
-	return LocalAPIKeyPolicy{key: key}, nil
+	return LocalAPIKeyPolicy{key: key, source: cleanSource(source)}, nil
 }
 
 func (p LocalAPIKeyPolicy) WrapHTTP(h http.Handler) http.Handler {
@@ -39,12 +48,13 @@ func (p LocalAPIKeyPolicy) WrapHTTP(h http.Handler) http.Handler {
 		if !sameSecret(token, p.key) {
 			return nil, auth.ErrInvalidToken
 		}
-		return tokenInfo("local-api-key", roleAgent), nil
+		return tokenInfo(localAPIKeyPrincipal()), nil
 	}
 	return requireTuskbaseBearer(verifier)(h)
 }
 
-func (LocalAPIKeyPolicy) Name() string { return "local-api-key" }
+func (LocalAPIKeyPolicy) Name() string     { return "local-api-key" }
+func (p LocalAPIKeyPolicy) Source() string { return p.source }
 
 // LocalSharedKey describes one named local client credential.
 type LocalSharedKey struct {
@@ -54,12 +64,17 @@ type LocalSharedKey struct {
 }
 
 // LocalSharedKeyPolicy protects HTTP transports with per-agent local bearer tokens.
-// This is the Local Shared direction without introducing persistent key management yet.
+// This is enough for on-machine Local Shared usage without adding OAuth ceremony.
 type LocalSharedKeyPolicy struct {
-	keys []LocalSharedKey
+	keys   []LocalSharedKey
+	source string
 }
 
 func NewLocalSharedKeyPolicy(keys []LocalSharedKey) (LocalSharedKeyPolicy, error) {
+	return NewLocalSharedKeyPolicyWithSource(keys, "manual")
+}
+
+func NewLocalSharedKeyPolicyWithSource(keys []LocalSharedKey, source string) (LocalSharedKeyPolicy, error) {
 	if len(keys) == 0 {
 		return LocalSharedKeyPolicy{}, errors.New("at least one local shared key is required")
 	}
@@ -67,7 +82,7 @@ func NewLocalSharedKeyPolicy(keys []LocalSharedKey) (LocalSharedKeyPolicy, error
 	cleaned := make([]LocalSharedKey, 0, len(keys))
 	for _, key := range keys {
 		key.Name = strings.TrimSpace(key.Name)
-		role, err := parseRole(key.Role)
+		role, err := NormalizeLocalRole(key.Role)
 		if err != nil {
 			return LocalSharedKeyPolicy{}, err
 		}
@@ -75,6 +90,9 @@ func NewLocalSharedKeyPolicy(keys []LocalSharedKey) (LocalSharedKeyPolicy, error
 		key.Key = strings.TrimSpace(key.Key)
 		if key.Name == "" {
 			return LocalSharedKeyPolicy{}, errors.New("local shared key name is required")
+		}
+		if strings.ContainsAny(key.Name, ",:\t\n\r ") {
+			return LocalSharedKeyPolicy{}, fmt.Errorf("local shared key name %q cannot contain whitespace, comma, or colon", key.Name)
 		}
 		if key.Key == "" {
 			return LocalSharedKeyPolicy{}, fmt.Errorf("local shared key for %q is required", key.Name)
@@ -85,7 +103,7 @@ func NewLocalSharedKeyPolicy(keys []LocalSharedKey) (LocalSharedKeyPolicy, error
 		seen[key.Name] = struct{}{}
 		cleaned = append(cleaned, key)
 	}
-	return LocalSharedKeyPolicy{keys: cleaned}, nil
+	return LocalSharedKeyPolicy{keys: cleaned, source: cleanSource(source)}, nil
 }
 
 // ParseLocalSharedKeys parses comma-separated name:role:key specs.
@@ -111,7 +129,7 @@ func (p LocalSharedKeyPolicy) WrapHTTP(h http.Handler) http.Handler {
 	verifier := func(ctx context.Context, token string, req *http.Request) (*auth.TokenInfo, error) {
 		for _, key := range p.keys {
 			if sameSecret(token, key.Key) {
-				return tokenInfo(key.Name, key.Role), nil
+				return tokenInfo(localSharedKeyPrincipal(key)), nil
 			}
 		}
 		return nil, auth.ErrInvalidToken
@@ -119,20 +137,56 @@ func (p LocalSharedKeyPolicy) WrapHTTP(h http.Handler) http.Handler {
 	return requireTuskbaseBearer(verifier)(h)
 }
 
-func (LocalSharedKeyPolicy) Name() string { return "local-shared-keys" }
+func (LocalSharedKeyPolicy) Name() string     { return "local-shared-keys" }
+func (p LocalSharedKeyPolicy) Source() string { return p.source }
 
 func requireTuskbaseBearer(verifier auth.TokenVerifier) func(http.Handler) http.Handler {
-	return auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{Scopes: []string{localAPIKeyScope}})
-}
-
-func tokenInfo(userID, role string) *auth.TokenInfo {
-	return &auth.TokenInfo{
-		Scopes:     roleScopes(role),
-		Expiration: time.Now().Add(time.Hour),
-		UserID:     userID,
-		Extra:      map[string]any{"role": role},
+	return func(h http.Handler) http.Handler {
+		withPrincipal := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if ti := auth.TokenInfoFromContext(r.Context()); ti != nil {
+				if principal, ok := principalFromTokenInfo(ti); ok {
+					r = r.WithContext(app.ContextWithPrincipal(r.Context(), principal))
+				}
+			}
+			h.ServeHTTP(w, r)
+		})
+		return auth.RequireBearerToken(verifier, &auth.RequireBearerTokenOptions{Scopes: []string{localAPIKeyScope}})(withPrincipal)
 	}
 }
+
+func tokenInfo(principal app.Principal) *auth.TokenInfo {
+	return &auth.TokenInfo{
+		Scopes:     roleScopes(string(principal.Role)),
+		Expiration: time.Now().Add(time.Hour),
+		UserID:     principal.Subject,
+		Extra:      map[string]any{"role": string(principal.Role), "principal": principal},
+	}
+}
+
+func principalFromTokenInfo(ti *auth.TokenInfo) (app.Principal, bool) {
+	principal, ok := ti.Extra["principal"].(app.Principal)
+	return principal, ok
+}
+
+func localAPIKeyPrincipal() app.Principal {
+	return app.Principal{
+		Subject:    "local-api-key",
+		Role:       app.RoleAgent,
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: "local-api-key"},
+		AuthSource: app.AuthSourceLocalAPIKey,
+	}
+}
+
+func localSharedKeyPrincipal(key LocalSharedKey) app.Principal {
+	return app.Principal{
+		Subject:    strings.TrimSpace(key.Name),
+		Role:       app.Role(key.Role),
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: strings.TrimSpace(key.Name)},
+		AuthSource: app.AuthSourceLocalSharedKey,
+	}
+}
+
+// TODO(hosted-auth): Add OAuth/API-key principal resolvers for Hosted without changing application use cases.
 
 func roleScopes(role string) []string {
 	switch role {
@@ -147,7 +201,7 @@ func roleScopes(role string) []string {
 	}
 }
 
-func parseRole(role string) (string, error) {
+func NormalizeLocalRole(role string) (string, error) {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case roleReader:
 		return roleReader, nil
@@ -158,6 +212,14 @@ func parseRole(role string) (string, error) {
 	default:
 		return "", fmt.Errorf("unsupported local shared role %q", role)
 	}
+}
+
+func cleanSource(source string) string {
+	source = strings.TrimSpace(source)
+	if source == "" {
+		return "unknown"
+	}
+	return source
 }
 
 func sameSecret(got, want string) bool {

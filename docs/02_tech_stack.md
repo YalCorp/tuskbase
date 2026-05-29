@@ -9,9 +9,10 @@ The core product should remain stable if a database, vector index, embedding pro
 The first product surfaces are:
 
 - local HTTP API server,
-- local MCP server.
+- local MCP server,
+- setup and diagnostics CLI.
 
-Both surfaces should use the same application core. A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. A CLI is not a primary offering; it may be added later only for local administration, development, or debugging if needed.
+All surfaces should use the same application core. A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. The CLI should stay focused on setup, diagnostics, daemon operation, and local auth administration rather than becoming the product center.
 
 ## Current Defaults
 
@@ -21,7 +22,7 @@ These defaults are meant to make the first implementation practical while preser
 |---|---|
 | Server runtime | Go local service, built toward a single native binary. |
 | HTTP surface | Go HTTP adapter at the edge, sharing the same application core as MCP. |
-| Agent integration | Local MCP server as a first-class surface, hosted by the Go service. |
+| Agent integration | Local MCP server as a first-class surface, with stdio bridge setup for local authenticated daemon use. |
 | Durable storage | SQLite as the zero-config local default; Postgres available as a shared/team store adapter behind the same ports. |
 | Semantic retrieval | Text search first, with vector retrieval behind `VectorIndex`; pgvector or another vector adapter can follow without becoming core. |
 | Embeddings | Local, OpenAI-compatible, and deterministic test providers behind one provider interface. |
@@ -39,8 +40,8 @@ Tuskbase should grow through four product tiers. The same application core and d
 | Tier | Intended use | MCP transport | Durable store | Retrieval direction |
 |---|---|---|---|---|
 | Demo | Prove Tuskbase works with the least setup | stdio MCP | SQLite | text search |
-| Local Basic | One developer using one or more local agents on one machine | local HTTP MCP daemon | SQLite | text search, optional OpenAI embeddings |
-| Local Shared | Heavy local multi-agent usage or small shared setup | local HTTP MCP daemon | Postgres | pgvector with OpenAI, Ollama, or future embedded embeddings |
+| Local Basic | One developer using one or more local agents on one machine | stdio bridge to loopback HTTP MCP daemon | SQLite | text search, optional OpenAI embeddings |
+| Local Shared | Heavy local multi-agent usage or small shared setup | stdio bridge to loopback HTTP MCP daemon | Postgres | pgvector with OpenAI, Ollama, or future embedded embeddings |
 | Hosted | Future managed team product | managed HTTP MCP | managed Postgres | managed vector retrieval, Qdrant optional at scale |
 
 SQLite is the Demo and Local Basic default, not the ceiling for serious multi-agent workflows. Local Shared should use Postgres so Codex, Claude, Cursor, and other tools can coordinate through one durable decision store. Postgres also creates a natural path to pgvector, Supabase, self-hosted deployments, and future hosted Tuskbase.
@@ -77,7 +78,7 @@ The first useful version should run on a developer machine with:
 
 - one local Go service,
 - a local API server,
-- a local MCP server,
+- a local MCP server with bridge setup for authenticated clients,
 - local durable storage,
 - optional local embeddings,
 - simple local authentication,

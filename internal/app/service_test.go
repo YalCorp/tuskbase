@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/priyavratuniyal/tuskbase/internal/adapters/sqlite"
@@ -171,6 +172,103 @@ func TestCompletenessScoringWarnings(t *testing.T) {
 	}
 	if rich.Decision.CompletenessScore <= sparse.Decision.CompletenessScore {
 		t.Fatalf("rich score %.2f <= sparse score %.2f", rich.Decision.CompletenessScore, sparse.Decision.CompletenessScore)
+	}
+}
+
+func TestRememberUsesAuthenticatedPrincipalActor(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	principal := app.Principal{
+		Subject:    "codex",
+		Role:       app.RoleAgent,
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: "codex"},
+		AuthSource: app.AuthSourceLocalSharedKey,
+	}
+	remembered, err := service.Remember(app.ContextWithPrincipal(ctx, principal), app.RememberInput{
+		WorkspaceID: attached.Workspace.ID,
+		Type:        "architecture",
+		Title:       "Use auth-derived actors",
+		Outcome:     "Authenticated writes derive actors from the transport identity.",
+		Confidence:  0.9,
+	})
+	if err != nil {
+		t.Fatalf("Remember() error = %v", err)
+	}
+	if remembered.Decision.Actor.Name != "codex" {
+		t.Fatalf("actor = %+v, want codex", remembered.Decision.Actor)
+	}
+}
+
+func TestRememberRejectsMismatchedPrincipalActor(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	principal := app.Principal{
+		Subject:    "codex",
+		Role:       app.RoleAgent,
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: "codex"},
+		AuthSource: app.AuthSourceLocalSharedKey,
+	}
+	_, err := service.Remember(app.ContextWithPrincipal(ctx, principal), app.RememberInput{
+		WorkspaceID: attached.Workspace.ID,
+		Actor:       domain.Actor{Kind: domain.ActorAgent, Name: "claude"},
+		Type:        "architecture",
+		Title:       "Reject mismatched actor",
+		Outcome:     "The request actor cannot disagree with the authenticated identity.",
+		Confidence:  0.9,
+	})
+	if !errors.Is(err, app.ErrForbidden) {
+		t.Fatalf("Remember() error = %v, want forbidden", err)
+	}
+}
+
+func TestAuthenticatedPermissions(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+	reader := app.ContextWithPrincipal(ctx, app.Principal{
+		Subject:    "reader",
+		Role:       app.RoleReader,
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: "reader"},
+		AuthSource: app.AuthSourceLocalSharedKey,
+	})
+
+	if _, err := service.Recent(reader, attached.Workspace.ID, 1); err != nil {
+		t.Fatalf("Recent(reader) error = %v", err)
+	}
+	_, err := service.Remember(reader, app.RememberInput{
+		WorkspaceID: attached.Workspace.ID,
+		Type:        "architecture",
+		Title:       "Reader cannot write",
+		Outcome:     "Readers cannot mutate decisions.",
+		Confidence:  0.9,
+	})
+	if !errors.Is(err, app.ErrForbidden) {
+		t.Fatalf("Remember(reader) error = %v, want forbidden", err)
+	}
+}
+
+func TestNoAuthRememberStillRequiresActor(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	_, err := service.Remember(ctx, app.RememberInput{
+		WorkspaceID: attached.Workspace.ID,
+		Type:        "architecture",
+		Title:       "Missing actor",
+		Outcome:     "Unauthenticated stdio calls still provide actor explicitly.",
+		Confidence:  0.9,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid actor kind") {
+		t.Fatalf("Remember() error = %v, want invalid actor", err)
 	}
 }
 

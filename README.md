@@ -8,7 +8,7 @@ Tuskbase helps coding agents share repo context and decision history before they
 
 Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
 
-> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, required local API-key auth for HTTP MCP/REST, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
+> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, a stdio MCP bridge for local daemon auth, required local bearer auth for HTTP MCP/REST, auth-derived actor attribution for authenticated writes, local key admin commands, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
 
 ## How It Works
 
@@ -52,15 +52,32 @@ The Local Basic MCP endpoint is:
 http://127.0.0.1:8765/mcp
 ```
 
-Print client-specific MCP setup help:
+Print client-specific MCP setup help. The default client config uses `tuskbase bridge`, so MCP clients do not need `TUSKBASE_API_KEY` in every shell session. Add `--apply` for supported client automation such as Codex.
 
 ```bash
 go run ./cmd/tuskbase connect codex
+go run ./cmd/tuskbase connect codex --apply
 go run ./cmd/tuskbase connect claude
 go run ./cmd/tuskbase connect cursor
 ```
 
-Manual environment-variable setup is still supported for developers and CI. See [.env.example](.env.example).
+> **Important: Codex may show `Auth: Unsupported`.**
+> This is expected for Tuskbase's default local setup because Codex launches
+> `tuskbase bridge` over stdio, and the bridge authenticates to the local daemon
+> internally. It does not mean Tuskbase daemon auth is disabled. Run
+> `tuskbase status` to see the active daemon auth policy.
+
+Manage local auth keys:
+
+```bash
+go run ./cmd/tuskbase auth list
+go run ./cmd/tuskbase auth rotate
+go run ./cmd/tuskbase setup --mode local-shared
+go run ./cmd/tuskbase auth add --name windsurf --role agent
+go run ./cmd/tuskbase auth rotate --name codex
+```
+
+Manual HTTP/environment-variable setup is still supported for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set. See [.env.example](.env.example).
 
 The REST API is optional and is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging after setup:
 
@@ -70,7 +87,7 @@ go run ./cmd/tuskbase serve --http-mcp --rest
 
 ## Current Interfaces
 
-The first product surface is MCP. Tuskbase currently supports two MCP paths from the same application core: stdio MCP for Demo mode and loopback HTTP MCP for Local Basic daemon mode.
+The first product surface is MCP. Tuskbase currently supports stdio MCP for Demo mode, loopback HTTP MCP for daemon mode, and a stdio bridge that lets local MCP clients use Tuskbase-managed credentials without storing bearer tokens in client config. Some MCP clients may label stdio bridge auth as unsupported because the client itself is not managing the bearer token; Tuskbase daemon auth is still enforced behind the bridge.
 
 The current runtime is a Go local service backed by local SQLite storage by default. Packaging wrappers such as npm, Homebrew, or GitHub release binaries remain distribution conveniences.
 

@@ -6,16 +6,26 @@ This project follows a human-readable changelog style inspired by Keep a Changel
 
 ## [Unreleased]
 
-## [v0.2.1] - 2026-05-27
+No unreleased changes yet.
+
+## [v0.2.1] - Unreleased
 
 ### Added
 
 - Added `.env.example` for manual local configuration.
-- Added friendly `setup`, `start`, `status`, `connect`, and `auth show` CLI commands.
+- Added friendly `setup`, `start`, `status`, `connect`, `bridge`, and `auth show` CLI commands.
+- Added bridge-based MCP client setup so local clients can use Tuskbase-managed credentials without `TUSKBASE_API_KEY` in every shell session.
+- Added Codex setup automation via `connect codex --apply`.
+- Added Local Basic key rotation and Local Shared named-key admin commands.
+- Added auth-derived actor attribution for authenticated writes.
+- Documented that Codex may show `Auth: Unsupported` for stdio bridge setup even though daemon auth is still enforced.
 
 ### Security
 
-- Made HTTP MCP and REST require bearer auth by default, with `tuskbase setup` generating the Local Basic key and env vars available as manual overrides.
+- Made HTTP MCP and REST require bearer auth by default, with `tuskbase setup` generating local keys and env vars available as manual overrides.
+- Added config-backed auth refresh so local key rotation does not require copying tokens into MCP client config.
+- Hardened local config permissions and rejects symlinked secret config files.
+- Enforced reader/agent/admin permissions for authenticated application calls.
 
 ## [v0.1.0] - 2026-05-24
 
