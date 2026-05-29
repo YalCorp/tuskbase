@@ -65,7 +65,7 @@ The first product surfaces are:
 
 The API and MCP server should expose the same core loop through shared application use cases. The first implementation should be a Go local service that can run both surfaces from one process.
 
-A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
+A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. The CLI should stay focused on setup, diagnostics, daemon operation, and local auth administration rather than becoming the product center.
 
 ## Core User Journeys
 

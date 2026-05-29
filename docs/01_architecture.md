@@ -85,7 +85,7 @@ Phase 1 should focus on:
 - replaceable storage, vector, and embedding adapters,
 - offline-friendly Go tests.
 
-A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. A CLI is not a primary offering; it may be added later only if it clearly helps local administration, development, or debugging.
+A UI comes after the API and MCP flows are useful. SDKs come after the core contracts are stable. The CLI should stay focused on setup, diagnostics, daemon operation, and local auth administration rather than becoming the product center.
 
 ## Security Shape
 
