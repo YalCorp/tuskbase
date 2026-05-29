@@ -4,11 +4,7 @@ All notable changes to Tuskbase will be documented in this file.
 
 This project follows a human-readable changelog style inspired by Keep a Changelog, and release tags should use semantic versioning once public releases begin.
 
-## [Unreleased]
-
-No unreleased changes yet.
-
-## [v0.2.1] - Unreleased
+## [v0.2.1]
 
 ### Added
 
