@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -107,7 +106,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 
 func runDaemonCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(stdout, "Usage: tuskbase daemon <start|status>")
+		fmt.Fprintln(stdout, "Usage: tuskbase daemon <start|status|install|uninstall|restart>")
 		return nil
 	}
 	switch args[0] {
@@ -115,9 +114,62 @@ func runDaemonCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 		return runServe(ctx, append([]string{"--http-mcp"}, args[1:]...), stdout, stderr)
 	case "status":
 		return runDaemonStatus(args[1:], stdout, stderr)
+	case "install":
+		cfg, err := daemonCommandConfig(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return printDaemonLifecycleResult(stdout, "install", newLifecycleController().InstallAndStart(ctx, cfg))
+	case "uninstall":
+		cfg, err := daemonCommandConfig(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return printDaemonLifecycleResult(stdout, "uninstall", newLifecycleController().Uninstall(ctx, cfg))
+	case "restart":
+		cfg, err := daemonCommandConfig(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return printDaemonLifecycleResult(stdout, "restart", newLifecycleController().Restart(ctx, cfg))
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
+}
+
+func printDaemonLifecycleResult(stdout io.Writer, action string, result lifecycleResult) error {
+	printLifecycleResult(stdout, "service", result)
+	if result.Err != nil {
+		return fmt.Errorf("daemon %s: %w", action, result.Err)
+	}
+	if result.Degraded {
+		detail := result.Detail
+		if strings.TrimSpace(detail) == "" {
+			detail = emptyDefault(result.State, "degraded")
+		}
+		return fmt.Errorf("daemon %s degraded: %s", action, detail)
+	}
+	return nil
+}
+
+func daemonCommandConfig(args []string, stderr io.Writer) (userConfig, error) {
+	fs := flag.NewFlagSet("daemon", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	addr := fs.String("addr", configuredAddr(), "daemon address")
+	dbPath := fs.String("db", configuredDBPath(), "SQLite database path")
+	if err := fs.Parse(args); err != nil {
+		return userConfig{}, err
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		return userConfig{}, err
+	}
+	if !found {
+		return userConfig{}, errors.New("no Tuskbase setup found; run `tuskbase setup` first")
+	}
+	cfg.Addr = *addr
+	cfg.DBPath = *dbPath
+	return normalizedDaemonConfig(cfg), nil
 }
 
 func runDaemonStatus(args []string, stdout, stderr io.Writer) error {
@@ -127,12 +179,15 @@ func runDaemonStatus(args []string, stdout, stderr io.Writer) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	resp, err := http.Get("http://" + *addr + "/healthz")
+	cfg, found, err := loadUserConfig()
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
-	_, _ = io.Copy(stdout, resp.Body)
+	if !found {
+		cfg = userConfig{Mode: modeLocalBasic, Addr: *addr, DBPath: configuredDBPath()}
+	}
+	cfg.Addr = *addr
+	printLifecycleStatus(stdout, newLifecycleController().Status(context.Background(), normalizedDaemonConfig(cfg)))
 	return nil
 }
 
@@ -144,23 +199,39 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	cfg, err := loadRuntimeConfig(*addr, *dbPath, true, false)
+	cfg, found, err := loadUserConfig()
 	if err != nil {
 		return err
 	}
-	d, err := newDaemon(ctx, cfg)
-	if err != nil {
-		return err
+	if !found {
+		cfg = userConfig{Mode: modeLocalBasic}
 	}
-	defer d.Close()
+	cfg.Addr = *addr
+	cfg.DBPath = *dbPath
+	cfg = normalizedDaemonConfig(cfg)
+	authPolicy, authErr := loadAuthPolicy(cfg.Mode != modeDemo)
+	status := newLifecycleController().Status(ctx, cfg)
 	fmt.Fprintf(stdout, "tuskbase: ok\n")
 	fmt.Fprintf(stdout, "version: %s\n", version)
 	fmt.Fprintf(stdout, "store: sqlite\n")
-	fmt.Fprintf(stdout, "db_path: %s\n", *dbPath)
-	fmt.Fprintf(stdout, "addr: %s\n", *addr)
-	fmt.Fprintf(stdout, "mcp: ok\n")
-	fmt.Fprintf(stdout, "auth_policy: %s\n", cfg.Auth.Name())
-	fmt.Fprintf(stdout, "auth_source: %s\n", cfg.Auth.Source())
+	fmt.Fprintf(stdout, "db_path: %s\n", cfg.DBPath)
+	fmt.Fprintf(stdout, "addr: %s\n", cfg.Addr)
+	if status.Health != nil {
+		fmt.Fprintf(stdout, "mcp: ready\n")
+	} else {
+		fmt.Fprintf(stdout, "mcp: not-ready (%v)\n", status.HealthError)
+	}
+	if authErr != nil {
+		fmt.Fprintf(stdout, "auth_policy: unavailable\n")
+		fmt.Fprintf(stdout, "auth_error: %s\n", authErr)
+	} else {
+		fmt.Fprintf(stdout, "auth_policy: %s\n", authPolicy.Name())
+		fmt.Fprintf(stdout, "auth_source: %s\n", authPolicy.Source())
+	}
+	fmt.Fprintf(stdout, "service_backend: %s\n", status.Backend)
+	fmt.Fprintf(stdout, "service_state: %s\n", emptyDefault(status.State, "unknown"))
+	fmt.Fprintf(stdout, "service_autostart: %s\n", emptyDefault(status.Autostart, "unknown"))
+	fmt.Fprintf(stdout, "log_path: %s\n", status.LogPath)
 	if strings.EqualFold(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER"), "openai") && strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
 		fmt.Fprintf(stdout, "openai: missing OPENAI_API_KEY\n")
 	} else {
@@ -421,6 +492,9 @@ Compatibility:
   init-mcp [client]       Alias for connect-style MCP config output
   daemon start            Alias for start
   daemon status           Alias for status
+  daemon install          Install and start user-scope autostart
+  daemon restart          Restart the user-scope daemon service
+  daemon uninstall        Remove user-scope autostart
   -mode mcp|http|both     Legacy mode flag
 
 Environment:

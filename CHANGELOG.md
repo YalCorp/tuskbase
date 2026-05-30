@@ -4,6 +4,14 @@ All notable changes to Tuskbase will be documented in this file.
 
 This project follows a human-readable changelog style inspired by Keep a Changelog, and release tags should use semantic versioning once public releases begin.
 
+## [v0.2.2]
+
+### Fixed
+
+- Hardened MCP daemon lifecycle startup so bridge readiness checks retry detached fallback only for down daemons and fail clearly on bad `/healthz` responses.
+- Made `tuskbase daemon install|restart|uninstall` exit non-zero for degraded lifecycle results.
+- Refused temporary Go build artifacts for autostart service executables, and made detached fallback release child processes properly.
+
 ## [v0.2.1]
 
 ### Added

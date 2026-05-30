@@ -22,7 +22,7 @@ The first product surfaces are the local HTTP API server and local MCP server. B
 
 The intended runtime is a Go local service. Go is a product delivery choice: it supports a single native binary, straightforward concurrency, low local resource use, and simple packaging for agent workflows. Domain and application logic should still avoid depending on concrete HTTP, MCP, database, vector, or embedding packages.
 
-Later surfaces, such as a UI or SDKs, should use the same contracts or application core rather than introducing separate business logic.
+Later surfaces, such as a UI or SDKs, should use the same contracts or application core rather than introducing separate business logic. Daemon lifecycle management belongs at the CLI/composition edge: setup, bridge, status, and doctor may install, start, wake, or report on the local daemon, but domain and application use cases should remain unaware of systemd, launchd, scheduled tasks, or detached process fallback.
 
 ```text
 HTTP API / MCP / later UI / later SDKs / optional support CLI

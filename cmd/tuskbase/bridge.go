@@ -125,7 +125,22 @@ func runBridge(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	if err != nil {
 		return err
 	}
-	server, closeRemote, err := newBridgeServer(ctx, "http://"+*addr+"/mcp", NewConfigCredentialProvider(loadUserConfig), clientName)
+	credentials := NewConfigCredentialProvider(loadUserConfig)
+	if _, err := credentials.Credential(ctx, clientName); err != nil {
+		return err
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("no Tuskbase setup found; run `tuskbase setup` first")
+	}
+	cfg.Addr = *addr
+	if err := newLifecycleController().EnsureReady(ctx, normalizedDaemonConfig(cfg)); err != nil {
+		return err
+	}
+	server, closeRemote, err := newBridgeServer(ctx, "http://"+*addr+"/mcp", credentials, clientName)
 	if err != nil {
 		return err
 	}
@@ -164,7 +179,7 @@ func connectBridgeRemote(ctx context.Context, endpoint string, credentials Crede
 		DisableStandaloneSSE: true,
 	}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("connect to Tuskbase daemon at %s: %w; run `tuskbase start` first", endpoint, err)
+		return nil, fmt.Errorf("connect to Tuskbase daemon at %s: %w", endpoint, err)
 	}
 	return session, nil
 }

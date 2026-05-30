@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -35,13 +36,46 @@ type userConfig struct {
 	Mode          string                  `json:"mode"`
 	Addr          string                  `json:"addr"`
 	DBPath        string                  `json:"db_path,omitempty"`
+	Daemon        daemonSurfaceConfig     `json:"daemon"`
 	APIKey        string                  `json:"api_key,omitempty"`
 	AgentKeys     []daemon.LocalSharedKey `json:"agent_keys,omitempty"`
 	UpdatedAt     string                  `json:"updated_at"`
 }
 
+type daemonSurfaceConfig struct {
+	MCPEnabled       bool `json:"mcp_enabled"`
+	RESTEnabled      bool `json:"rest_enabled"`
+	AutostartEnabled bool `json:"autostart_enabled"`
+}
+
 func (cfg userConfig) HasAuth() bool {
 	return strings.TrimSpace(cfg.APIKey) != "" || len(cfg.AgentKeys) > 0
+}
+
+func (cfg userConfig) daemonMCPEnabled() bool {
+	return cfg.Mode != modeDemo && cfg.Daemon.MCPEnabled
+}
+
+func (cfg userConfig) daemonRESTEnabled() bool {
+	return cfg.Mode != modeDemo && cfg.Daemon.RESTEnabled
+}
+
+func (cfg userConfig) daemonAutostartEnabled() bool {
+	return cfg.Mode != modeDemo && cfg.Daemon.AutostartEnabled
+}
+
+func applyDaemonDefaults(cfg *userConfig) {
+	if cfg.Mode == modeDemo {
+		cfg.Daemon = daemonSurfaceConfig{MCPEnabled: false, RESTEnabled: false, AutostartEnabled: false}
+		return
+	}
+	if !cfg.Daemon.MCPEnabled && !cfg.Daemon.RESTEnabled && !cfg.Daemon.AutostartEnabled {
+		cfg.Daemon = daemonSurfaceConfig{MCPEnabled: true, RESTEnabled: false, AutostartEnabled: true}
+		return
+	}
+	if !cfg.Daemon.MCPEnabled {
+		cfg.Daemon.MCPEnabled = true
+	}
 }
 
 func runSetup(args []string, stdout, stderr io.Writer) error {
@@ -91,6 +125,7 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		cfg.DBPath = defaultDBPath()
 	}
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	applyDaemonDefaults(&cfg)
 	generatedSecret := false
 
 	switch selectedMode {
@@ -142,6 +177,16 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		default:
 			fmt.Fprintf(stdout, "secret: reused from existing config\n")
 		}
+	}
+	if cfg.Mode == modeDemo {
+		fmt.Fprintf(stdout, "service: skipped (demo mode)\n")
+	} else if *printOnly {
+		fmt.Fprintf(stdout, "service: skipped (--print-only)\n")
+	} else if cfg.daemonAutostartEnabled() {
+		result := newLifecycleController().InstallAndStart(context.Background(), cfg)
+		printLifecycleResult(stdout, "service", result)
+	} else {
+		fmt.Fprintf(stdout, "service: autostart disabled\n")
 	}
 	if *reveal {
 		printSecrets(stdout, cfg)
@@ -792,6 +837,7 @@ func loadUserConfig() (userConfig, bool, error) {
 	if cfg.ConfigVersion == 0 {
 		cfg.ConfigVersion = configVersionV1
 	}
+	applyDaemonDefaults(&cfg)
 	return cfg, true, nil
 }
 
