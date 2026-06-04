@@ -15,6 +15,8 @@ import (
 	"strings"
 	"syscall"
 
+	_ "github.com/jackc/pgx/v5/stdlib"
+
 	"github.com/priyavratuniyal/tuskbase/internal/adapters/embeddings"
 	"github.com/priyavratuniyal/tuskbase/internal/daemon"
 	"github.com/priyavratuniyal/tuskbase/internal/ports"
@@ -209,12 +211,30 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	cfg.Addr = *addr
 	cfg.DBPath = *dbPath
 	cfg = normalizedDaemonConfig(cfg)
+	store, storeErr := loadRuntimeStoreConfig(cfg.DBPath)
 	authPolicy, authErr := loadAuthPolicy(cfg.Mode != modeDemo)
 	status := newLifecycleController().Status(ctx, cfg)
 	fmt.Fprintf(stdout, "tuskbase: ok\n")
 	fmt.Fprintf(stdout, "version: %s\n", version)
-	fmt.Fprintf(stdout, "store: sqlite\n")
-	fmt.Fprintf(stdout, "db_path: %s\n", cfg.DBPath)
+	fmt.Fprintf(stdout, "store: %s\n", emptyDefault(store.Type, "unavailable"))
+	if store.Type == storeSQLite {
+		fmt.Fprintf(stdout, "db_path: %s\n", store.SQLitePath)
+	}
+	if store.Type == storePostgres {
+		fmt.Fprintf(stdout, "postgres_driver: %s\n", store.PostgresDriver)
+		fmt.Fprintf(stdout, "postgres_dsn: %s\n", secretStatus(store.PostgresDSN))
+		if cfg.Store.Postgres != nil && strings.TrimSpace(cfg.Store.Postgres.Source) != "" {
+			fmt.Fprintf(stdout, "postgres_source: %s\n", cfg.Store.Postgres.Source)
+		}
+		if cfg.Store.Postgres != nil && cfg.Store.Postgres.Docker != nil {
+			docker := cfg.Store.Postgres.Docker
+			fmt.Fprintf(stdout, "docker_postgres_image: %s\n", docker.Image)
+			fmt.Fprintf(stdout, "docker_postgres_port: %d\n", docker.Port)
+		}
+	}
+	if storeErr != nil {
+		fmt.Fprintf(stdout, "store_error: %s\n", storeErr)
+	}
 	fmt.Fprintf(stdout, "addr: %s\n", cfg.Addr)
 	if status.Health != nil {
 		fmt.Fprintf(stdout, "mcp: ready\n")
@@ -303,6 +323,7 @@ func legacyServeArgs(mode string) ([]string, error) {
 type runtimeConfig struct {
 	Addr       string
 	DBPath     string
+	Store      runtimeStoreConfig
 	HTTPMCP    bool
 	REST       bool
 	Embeddings ports.EmbeddingProvider
@@ -315,6 +336,10 @@ func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, 
 			return runtimeConfig{}, err
 		}
 	}
+	store, err := loadRuntimeStoreConfig(dbPath)
+	if err != nil {
+		return runtimeConfig{}, err
+	}
 	emb, err := loadEmbeddingProvider()
 	if err != nil {
 		return runtimeConfig{}, err
@@ -323,12 +348,31 @@ func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, 
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	return runtimeConfig{Addr: addr, DBPath: dbPath, HTTPMCP: httpMCP, REST: rest, Embeddings: emb, Auth: authPolicy}, nil
+	return runtimeConfig{Addr: addr, DBPath: dbPath, Store: store, HTTPMCP: httpMCP, REST: rest, Embeddings: emb, Auth: authPolicy}, nil
 }
 
 func newDaemon(ctx context.Context, cfg runtimeConfig) (*daemon.TuskbaseDaemon, error) {
 	logger := slog.Default()
-	return daemon.New(ctx, daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}, daemon.SQLiteStoreFactory{Path: cfg.DBPath, Embedding: cfg.Embeddings, Logger: logger}, cfg.Auth)
+	factory, err := storeFactoryForRuntime(cfg, logger)
+	if err != nil {
+		return nil, err
+	}
+	return daemon.New(ctx, daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}, factory, cfg.Auth)
+}
+
+func storeFactoryForRuntime(cfg runtimeConfig, logger *slog.Logger) (daemon.StoreFactory, error) {
+	switch cfg.Store.Type {
+	case "", storeSQLite:
+		path := cfg.Store.SQLitePath
+		if strings.TrimSpace(path) == "" {
+			path = cfg.DBPath
+		}
+		return daemon.SQLiteStoreFactory{Path: path, Embedding: cfg.Embeddings, Logger: logger}, nil
+	case storePostgres:
+		return daemon.PostgresStoreFactory{DriverName: cfg.Store.PostgresDriver, DSN: cfg.Store.PostgresDSN, Embedding: cfg.Embeddings, Logger: logger}, nil
+	default:
+		return nil, fmt.Errorf("unknown store %q", cfg.Store.Type)
+	}
 }
 
 // loadEmbeddingProvider keeps embeddings optional; text lookup must stay usable without network access or a model provider.
@@ -501,5 +545,10 @@ Environment:
   TUSKBASE_CONFIG_PATH    Override the Tuskbase config file path
   TUSKBASE_API_KEY        Manual bearer key for HTTP MCP and REST
   TUSKBASE_AGENT_KEYS     Local Shared keys as name:role:key,name:role:key
+  TUSKBASE_ADDR           Override the local daemon listen address
+  TUSKBASE_DB_PATH        Override the SQLite database path
+  TUSKBASE_STORE          Durable store override: sqlite or postgres
+  TUSKBASE_POSTGRES_DSN   Postgres DSN for Local Shared
+  TUSKBASE_POSTGRES_DRIVER Postgres database/sql driver; defaults to pgx
 `)
 }

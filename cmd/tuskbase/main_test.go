@@ -138,7 +138,7 @@ func TestEnvExampleDocumentsSupportedVariables(t *testing.T) {
 		t.Fatalf("read .env.example: %v", err)
 	}
 	got := string(data)
-	for _, want := range []string{"TUSKBASE_API_KEY", "TUSKBASE_AGENT_KEYS", "TUSKBASE_ADDR", "TUSKBASE_DB_PATH", "TUSKBASE_CONFIG_PATH", "OPENAI_API_KEY"} {
+	for _, want := range []string{"TUSKBASE_API_KEY", "TUSKBASE_AGENT_KEYS", "TUSKBASE_ADDR", "TUSKBASE_STORE", "TUSKBASE_DB_PATH", "TUSKBASE_POSTGRES_DSN", "TUSKBASE_POSTGRES_DRIVER", "TUSKBASE_DOCKER_POSTGRES_IMAGE", "TUSKBASE_DOCKER_POSTGRES_PORT", "TUSKBASE_CONFIG_PATH", "OPENAI_API_KEY"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf(".env.example missing %q", want)
 		}
@@ -185,6 +185,117 @@ func TestLoadRuntimeConfigUsesLocalSharedKeys(t *testing.T) {
 	}
 	if got := cfg.Auth.Name(); got != "local-shared-keys" {
 		t.Fatalf("auth policy = %q, want local-shared-keys", got)
+	}
+}
+
+func TestSetupLocalSharedStoresPostgresConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"setup", "--mode", "local-shared", "--postgres-dsn", "postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable", "--yes"}, &out, &errb); err != nil {
+		t.Fatalf("setup local-shared error = %v", err)
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		t.Fatalf("loadUserConfig() error = %v", err)
+	}
+	if !found {
+		t.Fatal("loadUserConfig() found = false")
+	}
+	if cfg.Store.Type != storePostgres || cfg.Store.Postgres == nil || cfg.Store.Postgres.Driver != defaultPostgresDriver || cfg.Store.Postgres.Source != postgresSourceExisting || !strings.Contains(cfg.Store.Postgres.DSN, "localhost:5432") {
+		t.Fatalf("store config = %+v", cfg.Store)
+	}
+	if !strings.Contains(out.String(), "postgres_source: existing") || !strings.Contains(out.String(), "postgres_dsn: configured") {
+		t.Fatalf("setup output = %q", out.String())
+	}
+}
+
+func TestSetupLocalSharedDefaultsToDockerPostgres(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"setup", "--mode", "local-shared", "--yes", "--docker-postgres-port", "9876", "--docker-postgres-image", "pgvector/pgvector:test"}, &out, &errb); err != nil {
+		t.Fatalf("setup local-shared docker error = %v", err)
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		t.Fatalf("loadUserConfig() error = %v", err)
+	}
+	if !found {
+		t.Fatal("loadUserConfig() found = false")
+	}
+	if cfg.Store.Type != storePostgres || cfg.Store.Postgres == nil || cfg.Store.Postgres.Source != postgresSourceDocker || cfg.Store.Postgres.Docker == nil {
+		t.Fatalf("store config = %+v", cfg.Store)
+	}
+	if cfg.Store.Postgres.Docker.Port != 9876 || cfg.Store.Postgres.Docker.Image != "pgvector/pgvector:test" {
+		t.Fatalf("docker config = %+v", cfg.Store.Postgres.Docker)
+	}
+	if !strings.Contains(cfg.Store.Postgres.DSN, "127.0.0.1:9876") {
+		t.Fatalf("docker dsn = %q", cfg.Store.Postgres.DSN)
+	}
+	if _, err := os.Stat(cfg.Store.Postgres.Docker.ComposePath); err != nil {
+		t.Fatalf("docker compose file was not written: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"postgres_source: docker", "docker_postgres: ready", "docker_postgres_port: 9876", "postgres_dsn: configured"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("setup docker output missing %q: %s", want, got)
+		}
+	}
+}
+
+func TestSetupLocalSharedDockerPrintOnlyDoesNotWriteCompose(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"setup", "--mode", "local-shared", "--print-only", "--yes"}, &out, &errb); err != nil {
+		t.Fatalf("setup local-shared print-only error = %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("config file exists after print-only, stat err = %v", err)
+	}
+	composePath := filepath.Join(root, "local-shared", "docker-compose.yml")
+	if _, err := os.Stat(composePath); !os.IsNotExist(err) {
+		t.Fatalf("compose file exists after print-only, stat err = %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "postgres_source: docker") || !strings.Contains(got, "docker_postgres: skipped (--print-only)") {
+		t.Fatalf("setup print-only output = %q", got)
+	}
+}
+
+func TestLoadRuntimeConfigUsesPostgresStoreFromConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	t.Setenv("TUSKBASE_API_KEY", "")
+	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	if err := saveUserConfig(path, userConfig{Mode: modeLocalShared, Addr: defaultAddr, AgentKeys: []daemon.LocalSharedKey{{Name: "codex", Role: "agent", Key: "secret"}}, Store: storeConfig{Type: storePostgres, Postgres: &postgresStoreConfig{Driver: defaultPostgresDriver, DSN: "postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable"}}}); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	cfg, err := loadRuntimeConfig("127.0.0.1:8765", "ignored.db", true, false)
+	if err != nil {
+		t.Fatalf("loadRuntimeConfig() error = %v", err)
+	}
+	if cfg.Store.Type != storePostgres || cfg.Store.PostgresDriver != defaultPostgresDriver || !strings.Contains(cfg.Store.PostgresDSN, "localhost:5432") {
+		t.Fatalf("runtime store = %+v", cfg.Store)
+	}
+	if got := cfg.Auth.Name(); got != "local-shared-keys" {
+		t.Fatalf("auth policy = %q, want local-shared-keys", got)
+	}
+}
+
+func TestLoadRuntimeConfigRequiresPostgresDSNForStoredLocalShared(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	t.Setenv("TUSKBASE_API_KEY", "")
+	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	if err := saveUserConfig(path, userConfig{Mode: modeLocalShared, Addr: defaultAddr, AgentKeys: []daemon.LocalSharedKey{{Name: "codex", Role: "agent", Key: "secret"}}, Store: storeConfig{Type: storePostgres, Postgres: &postgresStoreConfig{Driver: defaultPostgresDriver}}}); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	_, err := loadRuntimeConfig("127.0.0.1:8765", "ignored.db", true, false)
+	if err == nil || !strings.Contains(err.Error(), "postgres dsn is required") {
+		t.Fatalf("loadRuntimeConfig() error = %v, want postgres dsn requirement", err)
 	}
 }
 
@@ -391,6 +502,7 @@ func TestLocalSharedSetupHTTPMCPSmoke(t *testing.T) {
 	t.Setenv("TUSKBASE_CONFIG_PATH", filepath.Join(root, "config.json"))
 	t.Setenv("TUSKBASE_API_KEY", "")
 	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	t.Setenv("TUSKBASE_STORE", "sqlite")
 	var out, errb bytes.Buffer
 	if err := execute(ctx, []string{"setup", "--mode", "local-shared", "--yes"}, &out, &errb); err != nil {
 		t.Fatalf("setup local-shared error = %v", err)
@@ -425,6 +537,7 @@ func TestLocalSharedBridgeMCPSmoke(t *testing.T) {
 	t.Setenv("TUSKBASE_CONFIG_PATH", filepath.Join(root, "config.json"))
 	t.Setenv("TUSKBASE_API_KEY", "")
 	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	t.Setenv("TUSKBASE_STORE", "sqlite")
 	var out, errb bytes.Buffer
 	if err := execute(ctx, []string{"setup", "--mode", "local-shared", "--yes"}, &out, &errb); err != nil {
 		t.Fatalf("setup local-shared error = %v", err)

@@ -71,6 +71,8 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 const schemaSQL = `
+CREATE EXTENSION IF NOT EXISTS vector;
+
 CREATE TABLE IF NOT EXISTS workspaces (
     id TEXT PRIMARY KEY,
     repo_root TEXT NOT NULL,

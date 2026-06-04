@@ -36,6 +36,7 @@ type userConfig struct {
 	Mode          string                  `json:"mode"`
 	Addr          string                  `json:"addr"`
 	DBPath        string                  `json:"db_path,omitempty"`
+	Store         storeConfig             `json:"store,omitempty"`
 	Daemon        daemonSurfaceConfig     `json:"daemon"`
 	APIKey        string                  `json:"api_key,omitempty"`
 	AgentKeys     []daemon.LocalSharedKey `json:"agent_keys,omitempty"`
@@ -86,6 +87,11 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	printOnly := fs.Bool("print-only", false, "print the planned setup without writing config")
 	reveal := fs.Bool("reveal", false, "show generated secrets in printed output")
 	transport := fs.String("transport", transportBridge, "MCP client transport to print/apply: bridge or http")
+	postgresDSN := fs.String("postgres-dsn", "", "Postgres DSN for local-shared setup")
+	postgresDriver := fs.String("postgres-driver", "", "Postgres database/sql driver for local-shared setup")
+	postgresSource := fs.String("postgres-source", postgresSourceAuto, "Local Shared Postgres source: auto, docker, existing, or supabase")
+	dockerPostgresPort := fs.Int("docker-postgres-port", configuredDockerPostgresPort(), "host port for Docker-managed Local Shared Postgres")
+	dockerPostgresImage := fs.String("docker-postgres-image", configuredDockerPostgresImage(), "Docker image for Docker-managed Local Shared pgvector Postgres")
 	apply := fs.Bool("apply", false, "apply supported client config instead of only printing it")
 	yes := fs.Bool("yes", false, "accept defaults for non-interactive setup")
 	if err := fs.Parse(args); err != nil {
@@ -124,6 +130,18 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	if strings.TrimSpace(cfg.DBPath) == "" {
 		cfg.DBPath = defaultDBPath()
 	}
+	storeResult, err := applySetupStoreConfig(&cfg, setupStoreOptions{
+		PostgresDSN:         *postgresDSN,
+		PostgresDriver:      *postgresDriver,
+		PostgresSource:      *postgresSource,
+		DockerPostgresPort:  *dockerPostgresPort,
+		DockerPostgresImage: *dockerPostgresImage,
+		PrintOnly:           *printOnly,
+		ConfigPath:          path,
+	})
+	if err != nil {
+		return err
+	}
 	cfg.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	applyDaemonDefaults(&cfg)
 	generatedSecret := false
@@ -155,6 +173,8 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	fmt.Fprintf(stdout, "Tuskbase setup\n")
 	fmt.Fprintf(stdout, "mode: %s\n", cfg.Mode)
 	fmt.Fprintf(stdout, "addr: %s\n", cfg.Addr)
+	printStoreSummary(stdout, cfg)
+	printSetupStoreResult(stdout, storeResult)
 	fmt.Fprintf(stdout, "config: %s\n", path)
 	if found {
 		fmt.Fprintf(stdout, "existing config: reused\n")
@@ -182,6 +202,8 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "service: skipped (demo mode)\n")
 	} else if *printOnly {
 		fmt.Fprintf(stdout, "service: skipped (--print-only)\n")
+	} else if cfg.Mode == modeLocalShared && !hasPostgresDSN(cfg) {
+		fmt.Fprintf(stdout, "service: skipped (postgres dsn required for local-shared)\n")
 	} else if cfg.daemonAutostartEnabled() {
 		result := newLifecycleController().InstallAndStart(context.Background(), cfg)
 		printLifecycleResult(stdout, "service", result)
@@ -201,6 +223,27 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func printSetupStoreResult(w io.Writer, result setupStoreResult) {
+	if result.DockerPostgres == nil {
+		return
+	}
+	detail := strings.TrimSpace(result.DockerPostgres.Detail)
+	switch {
+	case result.DockerPostgres.Skipped:
+		if detail == "" {
+			detail = "skipped"
+		}
+		fmt.Fprintf(w, "docker_postgres: %s\n", detail)
+	case result.DockerPostgres.Ready:
+		fmt.Fprintf(w, "docker_postgres: ready\n")
+	default:
+		if detail == "" {
+			detail = "configured"
+		}
+		fmt.Fprintf(w, "docker_postgres: %s\n", detail)
+	}
 }
 
 func runConnect(args []string, stdout, stderr io.Writer) error {

@@ -24,7 +24,14 @@ var defaultTestLifecycle = &testLifecycleController{
 
 func TestMain(m *testing.M) {
 	newLifecycleController = func() lifecycleController { return defaultTestLifecycle }
+	newDockerPostgresProvisioner = func() dockerPostgresProvisioner { return testDockerPostgresProvisioner{} }
 	os.Exit(m.Run())
+}
+
+type testDockerPostgresProvisioner struct{}
+
+func (testDockerPostgresProvisioner) Provision(_ context.Context, req dockerPostgresProvisionRequest) (dockerPostgresProvisionResult, error) {
+	return dockerPostgresProvisionResult{Config: req.Config, DSN: postgresDSN(req.Config.Host, req.Config.Port, req.Config.User, req.Password, req.Config.Database), Ready: true, Detail: "ready"}, nil
 }
 
 func TestLifecycleHealthyDaemonSkipsStart(t *testing.T) {
@@ -198,7 +205,11 @@ func TestSetupInstallsAutostartForLocalModes(t *testing.T) {
 			controller := &testLifecycleController{result: lifecycleResult{Backend: "test", State: "running", LogPath: "test.log"}}
 			withLifecycle(t, controller)
 			var out, errb bytes.Buffer
-			if err := execute(context.Background(), []string{"setup", "--mode", mode, "--yes"}, &out, &errb); err != nil {
+			args := []string{"setup", "--mode", mode, "--yes"}
+			if mode == modeLocalShared {
+				args = append(args, "--postgres-dsn", "postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable")
+			}
+			if err := execute(context.Background(), args, &out, &errb); err != nil {
 				t.Fatalf("setup error = %v", err)
 			}
 			if got := atomic.LoadInt32(&controller.installCalls); got != 1 {
@@ -212,6 +223,21 @@ func TestSetupInstallsAutostartForLocalModes(t *testing.T) {
 				t.Fatalf("daemon defaults = %+v", cfg.Daemon)
 			}
 		})
+	}
+}
+
+func TestSetupLocalSharedExistingPostgresWithoutDSNFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	controller := &testLifecycleController{result: lifecycleResult{Backend: "test", State: "running"}}
+	withLifecycle(t, controller)
+	var out, errb bytes.Buffer
+	err := execute(context.Background(), []string{"setup", "--mode", "local-shared", "--postgres-source", "existing", "--yes"}, &out, &errb)
+	if err == nil || !strings.Contains(err.Error(), "postgres dsn is required") {
+		t.Fatalf("setup local-shared error = %v, want postgres dsn requirement", err)
+	}
+	if got := atomic.LoadInt32(&controller.installCalls); got != 0 {
+		t.Fatalf("InstallAndStart calls = %d, want 0", got)
 	}
 }
 
