@@ -8,7 +8,7 @@ Tuskbase helps coding agents share repo context and decision history before they
 
 Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
 
-> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, a self-healing stdio MCP bridge for local daemon auth, user-scope daemon lifecycle helpers for local setup, required local bearer auth for HTTP MCP/REST, auth-derived actor attribution for authenticated writes, local key admin commands, and an optional REST API. UI, SDKs, cloud sync, and packaging wrappers are still deferred.
+> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package with Local Shared runtime selection, Docker-managed pgvector Postgres provisioning for Local Shared setup, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, a self-healing stdio MCP bridge for local daemon auth, user-scope daemon lifecycle helpers for local setup, required local bearer auth for HTTP MCP/REST, auth-derived actor attribution for authenticated writes, local key admin commands, and an optional REST API. UI, SDKs, semantic pgvector retrieval, cloud sync, and packaging wrappers are still deferred.
 
 ## How It Works
 
@@ -62,12 +62,26 @@ Manage local auth keys:
 ```bash
 tuskbase auth list
 tuskbase auth rotate
-tuskbase setup --mode local-shared
 tuskbase auth add --name windsurf --role agent
 tuskbase auth rotate --name codex
 ```
 
-Manual HTTP/environment-variable setup is still supported for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set. See [.env.example](.env.example).
+Local Shared now has three setup entry points. The out-of-the-box path requires Docker Compose and starts a private Postgres+pgvector container on loopback port `8766` by default:
+
+```bash
+tuskbase setup --mode local-shared --yes
+```
+
+Existing Postgres and Supabase users can bring their own DSN instead:
+
+```bash
+tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable
+tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn postgres://...
+```
+
+All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it; existing Postgres and Supabase setups must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is still deferred. See [.env.example](.env.example).
+
+Manual HTTP/environment-variable setup is still supported for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set.
 
 Use diagnostics when recovering a local setup:
 
@@ -137,7 +151,7 @@ HTTP API / MCP / later UI / later SDKs / optional support CLI
 
 The domain and application layers should depend on explicit ports such as `EntryStore`, `GraphStore`, `VectorIndex`, `DocumentStore`, `ReceiptStore`, `ConflictStore`, and `EmbeddingProvider`. Concrete technologies belong at the composition root and adapter layer.
 
-SQLite is the default durable local adapter because Tuskbase should be easy to run on a developer machine. A Postgres store adapter now exists behind the same ports for shared/team deployments, but it is still an adapter rather than product identity. Canonical records live behind store interfaces. Search indexes are derived and rebuildable. Indexing failures must not cause a decision to be lost.
+SQLite is the default durable local adapter because Tuskbase should be easy to run on a developer machine. A Postgres store adapter now exists behind the same ports for shared/team deployments, and Local Shared can select it at runtime from a Docker-managed pgvector Postgres instance or a configured DSN. It is still an adapter rather than product identity. Canonical records live behind store interfaces. Search indexes are derived and rebuildable. Indexing failures must not cause a decision to be lost.
 
 ## Docs
 
