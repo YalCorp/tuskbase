@@ -137,6 +137,42 @@ Recommended setup paths:
 | Supabase Postgres | managed Postgres path | usable with `--postgres-source supabase --postgres-dsn`; repo memory leaves the machine |
 | Existing Postgres | advanced users | usable with `--postgres-source existing --postgres-dsn` or `TUSKBASE_POSTGRES_DSN` |
 
+## Current Setup Paths
+
+These are the setup paths available today. Tuskbase does not yet have interactive
+`Easy` or `Advanced` onboarding, and setup templates do not override runtime config yet.
+
+| Path | Command | Prerequisites |
+|---|---|---|
+| Local Basic | `tuskbase setup` | installed `tuskbase` binary |
+| Local Shared: Docker | `tuskbase setup --mode local-shared --yes` | Docker Compose |
+| Local Shared: existing Postgres | `tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn <dsn> --yes` | Postgres with pgvector available |
+| Local Shared: Supabase | `tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn <dsn> --yes` | Supabase project with pgvector enabled |
+
+Verify any setup with:
+
+```bash
+tuskbase doctor
+tuskbase status
+```
+
+The Docker Local Shared path currently writes user-specific Docker files under
+Tuskbase-owned local config state. The inspectable repo template lives at
+`deploy/local-shared/docker-compose.yaml`, with defaults in
+`deploy/local-shared/.env.example` and pgvector initialization in
+`deploy/local-shared/initdb/001-vector.sql`.
+
+To run the Docker template manually:
+
+```bash
+cd deploy/local-shared
+cp .env.example .env
+docker compose up -d
+```
+
+Manual template use is optional. The normal product path remains
+`tuskbase setup --mode local-shared --yes`.
+
 ## Hosted
 
 Hosted is future-facing.
