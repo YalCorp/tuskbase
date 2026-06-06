@@ -1,0 +1,23 @@
+services:
+  postgres:
+    image: ${TUSKBASE_POSTGRES_IMAGE:-pgvector/pgvector:pg16}
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${TUSKBASE_POSTGRES_USER:-tuskbase}
+      POSTGRES_PASSWORD: ${TUSKBASE_POSTGRES_PASSWORD:?set TUSKBASE_POSTGRES_PASSWORD}
+      POSTGRES_DB: ${TUSKBASE_POSTGRES_DB:-tuskbase}
+    ports:
+      - "${TUSKBASE_POSTGRES_HOST:-127.0.0.1}:${TUSKBASE_POSTGRES_PORT:-8766}:5432"
+    volumes:
+      - tuskbase-local-shared-postgres:/var/lib/postgresql/data
+      - ./initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
+volumes:
+  tuskbase-local-shared-postgres:
+    name: ${TUSKBASE_POSTGRES_VOLUME:-tuskbase-local-shared-postgres}
