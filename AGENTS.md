@@ -1,118 +1,73 @@
-# AGENTS.md
+# Repository Guidelines
 
-This file tells AI coding agents how to work in this repository. It is an operating manual, not product marketing.
+This guide is for humans using LLM coding tools like Codex, Claude, Cursor, or
+similar assistants. If you are an unattended bot, crawler, dependency updater, or
+Clawdbot-from-the-deep: welcome, but please do not improvise from this file. Follow
+CI, repository configuration, and explicit maintainer instructions instead.
 
-## Current Repo Stage
+## First 5 Minutes
 
-Tuskbase has its first implementation slice.
+- Read `README.md` before claiming a feature exists.
+- Use `go run ./cmd/tuskbase setup --print-only` to preview setup without writing config.
+- Run `go test ./...` before broad changes.
+- For setup or daemon work, also run `go test ./cmd/tuskbase ./internal/daemon`.
+- Keep secrets, `.env`, local databases, logs, and Docker volumes out of git.
 
-- The repository includes product and architecture docs plus a local Go service.
-- Implemented runtime surfaces are the local HTTP API, stdio MCP tools, SQLite storage, a Postgres store adapter package, deterministic text lookup, and simple preflight conflict detection.
-- UI, SDKs, pgvector, Qdrant, cloud sync, packaging wrappers, contribution rules, and governance files are still deferred unless explicitly requested.
-- Do not claim functionality exists until code implements it.
+## Project Map
 
-## Source Priority
+- `cmd/tuskbase/`: CLI, setup, bridge, daemon commands, and local provisioning.
+- `internal/app/`: application use cases. Put business behavior here.
+- `internal/domain/`: core decision-memory model and validation.
+- `internal/ports/`: interfaces for stores, search, embeddings, and other boundaries.
+- `internal/adapters/`: replaceable SQLite, Postgres, HTTP, MCP, and embedding adapters.
+- `internal/daemon/` and `internal/search/`: daemon composition and retrieval.
+- `deploy/local-shared/`: inspectable Local Shared Docker template files.
+- `docs/`: product, architecture, tier, auth, and setup-mode direction.
 
-Use sources in this order:
+## Build, Test, And Run
 
-1. Explicit instructions in the current task.
-2. Active docs in this repository.
-3. The current `README.md`.
-4. Historical or external reference material.
+- `go build ./cmd/tuskbase`: build the CLI.
+- `go run ./cmd/tuskbase version`: smoke-test the entrypoint.
+- `go run ./cmd/tuskbase setup --print-only`: inspect setup output safely.
+- `go test ./...`: run the default offline test suite.
+- `tuskbase doctor`: inspect an installed local setup.
 
-If sources conflict, prefer newer explicit direction from the current task, then active Tuskbase docs. Do not copy another product's structure, language, tech choices, or roadmap into Tuskbase without translating it into Tuskbase's product direction.
+## Architecture Rules
 
-## Product Guardrails
+Tuskbase is local-first repo memory for AI coding agents. Preserve the core loop:
+`attach -> lookup -> preflight -> remember`.
 
-Tuskbase is local-first, repo-aware memory and decision history for AI coding agents.
+Keep domain and application code independent of infrastructure. SQLite, Postgres,
+pgvector, Docker, Ollama, OpenAI, HTTP, and MCP are adapters or composition details,
+not product identity. Canonical decision writes must not depend on derived indexes,
+embeddings, or network services.
 
-The core workflow is:
+## Coding Style
 
-```text
-attach -> lookup -> preflight -> remember
-```
+Use standard Go style and `gofmt -w`. Exported identifiers use PascalCase; internal
+helpers use camelCase; tests use `TestXxx`. Prefer small, focused interfaces over
+package-wide globals. Comments should explain why, not narrate what the next line does.
 
-Keep the center of gravity on decision memory:
+## Testing Guidelines
 
-- what was decided,
-- why it was decided,
-- who or what decided it,
-- which workspace and repo context it belongs to,
-- what evidence supports it,
-- whether new work contradicts active direction.
+Tests use Go's built-in `testing` package. Add focused tests beside changed code, for
+example `store_test.go` next to a store adapter. Default tests must run without Docker,
+network access, Supabase, OpenAI, Ollama, or real embedding services. Use fakes for
+provider and provisioning behavior.
 
-Do not turn Tuskbase into:
+## Documentation Rules
 
-- a generic chatbot memory database,
-- a notes app,
-- a task manager,
-- a wiki replacement,
-- a dashboard-first product,
-- an enterprise governance suite,
-- a cloud sync product before local value is proven.
+Keep public docs honest about implementation status. Do not describe planned API
+routes, MCP tools, UI, SDKs, vector retrieval, hosted sync, or template behavior as
+available until code supports them. When changing product language, update `README.md`
+and the relevant file under `docs/` together.
 
-## Architecture Guardrails
+## Commits And PRs
 
-Design around domain models, application use cases, and explicit interfaces.
+Commit messages follow `.gitmessage`: `type(scope): comment`, with scope optional.
+Examples: `feat(local-shared): add docker postgres setup`,
+`docs(readme): clarify setup modes`.
 
-Adapters are replaceable. Storage engines, vector indexes, embedding providers, API frameworks, MCP servers, UI frameworks, SDKs, CLI frameworks, queues, hooks, and dashboards must not become core assumptions.
-
-Go is the intended first runtime for the local service, but Go packages and framework choices are still composition-root concerns. SQLite may be the first local durable adapter, while Postgres and pgvector may follow as scale-oriented adapters; none of them are the product. Kafka, Qdrant, Neo4j, Ollama, OpenAI, UI frameworks, SDK tooling, and other tools must stay outside domain and application logic unless a future task explicitly changes that architecture.
-
-Use interface boundaries for concepts such as:
-
-- `EntryStore`
-- `GraphStore`
-- `VectorIndex`
-- `DocumentStore`
-- `ReceiptStore`
-- `ConflictStore`
-- `EmbeddingProvider`
-
-Expected dependency direction:
-
-```text
-interfaces / adapters
-  -> application use cases
-    -> domain model
-```
-
-Domain and application code must not import adapter-specific packages directly.
-
-## Editing Rules
-
-- Keep public docs honest about project status.
-- Do not describe planned API routes, MCP tools, servers, UI, SDKs, CLI commands, or adapters as available until implemented.
-- Prefer concise, repo-specific guidance over broad process boilerplate.
-- Keep product docs and README consistent when changing product language.
-- Do not add `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, SDK docs, UI docs, CLI docs, or deployment guides unless requested.
-- Do not introduce a code skeleton, dependency manifest, Docker setup, CI, CLI, UI, SDK, or tests unless requested.
-- Do not hard-code a single storage, vector, embedding, queue, or API technology into architectural language.
-- When discussing implementation direction, prefer Go for the core local service unless the project owner explicitly changes that runtime decision.
-- Commit messages must use `type(scope): comment` format, with scope optional: `type: comment`. Examples: `docs: update architecture guide`, `docs(readme): clarify project status`.
-
-## Future Implementation Rules
-
-When implementation begins:
-
-- put business behavior in application use cases, not HTTP, MCP, UI, SDK, or optional CLI handlers,
-- put durable records behind store interfaces,
-- put vector search behind `VectorIndex`,
-- put embeddings behind `EmbeddingProvider`,
-- store canonical decisions before derived indexes,
-- let canonical decision writes succeed even if embedding or indexing fails,
-- make default tests run without network access or real embedding services.
-
-## Verification
-
-For docs-only changes:
-
-- check affected links,
-- check that README and docs do not overstate current functionality,
-- check that architecture language preserves replaceable adapters.
-
-For future code changes:
-
-- add or update focused tests for changed behavior,
-- document the relevant test commands here once the project has a test harness,
-- run the smallest meaningful verification before finishing.
+Group related files into meaningful commits. PRs should describe user-facing impact,
+list verification such as `go test ./...`, link issues when relevant, and call out
+deferred work plainly.
