@@ -23,6 +23,8 @@ const (
 	defaultDockerPostgresProject = "tuskbase-local-shared"
 	defaultDockerPostgresService = "postgres"
 	defaultDockerPostgresVolume  = "tuskbase-local-shared-postgres"
+	dockerContextAuto            = "auto"
+	dockerDesktopContext         = "desktop-linux"
 )
 
 type dockerPostgresProvisionRequest struct {
@@ -73,6 +75,13 @@ func provisionDockerPostgresForSetup(pg postgresStoreConfig, opts setupStoreOpti
 		config.Image = cleanDockerPostgresImage(opts.DockerPostgresImage)
 		config.Port = opts.DockerPostgresPort
 	}
+	if opts.DockerContextSet {
+		contextName, err := normalizeDockerContext(opts.DockerContext)
+		if err != nil {
+			return dockerPostgresProvisionResult{}, err
+		}
+		config.Context = contextName
+	}
 	if config.Port <= 0 || config.Port > 65535 {
 		return dockerPostgresProvisionResult{}, fmt.Errorf("docker postgres port %d is invalid", config.Port)
 	}
@@ -113,6 +122,24 @@ func configuredDockerPostgresImage() string {
 	return cleanDockerPostgresImage(os.Getenv("TUSKBASE_DOCKER_POSTGRES_IMAGE"))
 }
 
+func configuredDockerContext() string {
+	return strings.TrimSpace(os.Getenv("TUSKBASE_DOCKER_CONTEXT"))
+}
+
+func normalizeDockerContext(value string) (string, error) {
+	contextName := strings.TrimSpace(value)
+	if contextName == "" {
+		return "", nil
+	}
+	if strings.EqualFold(contextName, dockerContextAuto) {
+		return dockerContextAuto, nil
+	}
+	if strings.ContainsAny(contextName, " \t\n\r") {
+		return "", fmt.Errorf("docker context %q is invalid; expected a context name or auto", value)
+	}
+	return contextName, nil
+}
+
 func cleanDockerPostgresImage(value string) string {
 	if image := strings.TrimSpace(value); image != "" {
 		return image
@@ -138,6 +165,9 @@ func mergeDockerPostgresConfig(base, existing dockerPostgresConfig) dockerPostgr
 	}
 	if strings.TrimSpace(existing.ComposePath) != "" {
 		base.ComposePath = existing.ComposePath
+	}
+	if strings.TrimSpace(existing.Context) != "" {
+		base.Context = existing.Context
 	}
 	if strings.TrimSpace(existing.Service) != "" {
 		base.Service = existing.Service
@@ -238,20 +268,22 @@ func (p commandDockerPostgresProvisioner) Provision(ctx context.Context, req doc
 	if p.runner == nil {
 		p.runner = execCommandRunner{}
 	}
-	compose, err := detectDockerCompose(ctx, p.runner)
+	config := req.Config
+	compose, err := detectDockerCompose(ctx, p.runner, config.Context)
 	if err != nil {
 		return dockerPostgresProvisionResult{}, err
 	}
-	if _, err := compose.run(ctx, p.runner, req.Config, "up", "-d"); err != nil {
-		return dockerPostgresProvisionResult{}, err
+	config.Context = compose.context
+	if _, err := compose.run(ctx, p.runner, config, "up", "-d"); err != nil {
+		return dockerPostgresProvisionResult{}, diagnoseDockerProvisionError(ctx, p.runner, config, err)
 	}
-	if err := p.waitReady(ctx, compose, req.Config); err != nil {
-		return dockerPostgresProvisionResult{}, err
+	if err := p.waitReady(ctx, compose, config); err != nil {
+		return dockerPostgresProvisionResult{}, diagnoseDockerProvisionError(ctx, p.runner, config, err)
 	}
-	if _, err := compose.run(ctx, p.runner, req.Config, "exec", "-T", req.Config.Service, "psql", "-v", "ON_ERROR_STOP=1", "-U", req.Config.User, "-d", req.Config.Database, "-c", "CREATE EXTENSION IF NOT EXISTS vector;"); err != nil {
-		return dockerPostgresProvisionResult{}, fmt.Errorf("enable pgvector extension: %w", err)
+	if _, err := compose.run(ctx, p.runner, config, "exec", "-T", config.Service, "psql", "-v", "ON_ERROR_STOP=1", "-U", config.User, "-d", config.Database, "-c", "CREATE EXTENSION IF NOT EXISTS vector;"); err != nil {
+		return dockerPostgresProvisionResult{}, fmt.Errorf("enable pgvector extension: %w", diagnoseDockerProvisionError(ctx, p.runner, config, err))
 	}
-	return dockerPostgresProvisionResult{Config: req.Config, Ready: true, Detail: "ready"}, nil
+	return dockerPostgresProvisionResult{Config: config, Ready: true, Detail: "ready"}, nil
 }
 
 func (p commandDockerPostgresProvisioner) waitReady(ctx context.Context, compose dockerComposeCommand, cfg dockerPostgresConfig) error {
@@ -302,14 +334,33 @@ func (execCommandRunner) Run(ctx context.Context, name string, args ...string) (
 }
 
 type dockerComposeCommand struct {
-	name   string
-	prefix []string
+	name    string
+	prefix  []string
+	context string
 }
 
-func detectDockerCompose(ctx context.Context, runner commandRunner) (dockerComposeCommand, error) {
+func detectDockerCompose(ctx context.Context, runner commandRunner, dockerContext string) (dockerComposeCommand, error) {
 	if runner == nil {
 		return dockerComposeCommand{}, errors.New("docker command runner is required")
 	}
+	contextName, err := normalizeDockerContext(dockerContext)
+	if err != nil {
+		return dockerComposeCommand{}, err
+	}
+	switch {
+	case contextName == dockerContextAuto:
+		return detectDockerComposeAuto(ctx, runner)
+	case contextName != "":
+		if err := requireDockerContextReachable(ctx, runner, contextName); err != nil {
+			return dockerComposeCommand{}, err
+		}
+		return dockerComposeCommand{name: "docker", prefix: []string{"--context", contextName, "compose"}, context: contextName}, nil
+	default:
+		return detectDefaultDockerCompose(ctx, runner)
+	}
+}
+
+func detectDefaultDockerCompose(ctx context.Context, runner commandRunner) (dockerComposeCommand, error) {
 	if _, err := runner.Run(ctx, "docker", "compose", "version"); err == nil {
 		return dockerComposeCommand{name: "docker", prefix: []string{"compose"}}, nil
 	}
@@ -317,6 +368,82 @@ func detectDockerCompose(ctx context.Context, runner commandRunner) (dockerCompo
 		return dockerComposeCommand{name: "docker-compose"}, nil
 	}
 	return dockerComposeCommand{}, errors.New("Docker Compose is required for Local Shared Docker setup; install Docker Desktop or Docker Engine with the compose plugin, or pass --postgres-source existing --postgres-dsn <dsn>")
+}
+
+func detectDockerComposeAuto(ctx context.Context, runner commandRunner) (dockerComposeCommand, error) {
+	compose, composeErr := detectDefaultDockerCompose(ctx, runner)
+	var defaultErr error
+	if composeErr == nil {
+		if compose.name == "docker-compose" {
+			return compose, nil
+		}
+		if _, defaultErr = runner.Run(ctx, "docker", "info"); defaultErr == nil {
+			return compose, nil
+		}
+	} else {
+		defaultErr = composeErr
+	}
+	if err := dockerContextReachable(ctx, runner, dockerDesktopContext); err == nil {
+		return dockerComposeCommand{name: "docker", prefix: []string{"--context", dockerDesktopContext, "compose"}, context: dockerDesktopContext}, nil
+	} else {
+		return dockerComposeCommand{}, fmt.Errorf("Docker default context is not reachable (%v) and Docker Desktop context %q is unavailable (%v); start Docker Desktop or Docker Engine, fix Docker daemon access, or pass --postgres-source existing --postgres-dsn <dsn>", defaultErr, dockerDesktopContext, err)
+	}
+}
+
+func requireDockerContextReachable(ctx context.Context, runner commandRunner, contextName string) error {
+	if err := dockerContextReachable(ctx, runner, contextName); err != nil {
+		if contextName == dockerDesktopContext {
+			return fmt.Errorf("Docker context %q is not reachable; start Docker Desktop and rerun setup, or pass --postgres-source existing --postgres-dsn <dsn>: %w", contextName, err)
+		}
+		return fmt.Errorf("Docker context %q is not reachable; start Docker for that context and rerun setup, or pass --postgres-source existing --postgres-dsn <dsn>: %w", contextName, err)
+	}
+	return nil
+}
+
+func dockerContextReachable(ctx context.Context, runner commandRunner, contextName string) error {
+	if _, err := runner.Run(ctx, "docker", "--context", contextName, "info"); err != nil {
+		return err
+	}
+	if _, err := runner.Run(ctx, "docker", "--context", contextName, "compose", "version"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func diagnoseDockerProvisionError(ctx context.Context, runner commandRunner, cfg dockerPostgresConfig, err error) error {
+	contextName := strings.TrimSpace(cfg.Context)
+	if contextName == "" && isDockerDaemonAccessError(err) {
+		if reachableErr := dockerContextReachable(ctx, runner, dockerDesktopContext); reachableErr == nil {
+			return fmt.Errorf("Docker default context failed: %w. Docker Desktop context %q is reachable, but Tuskbase did not switch contexts automatically; rerun with `tuskbase setup --mode local-shared --docker-context desktop-linux --yes`, or pass --postgres-source existing --postgres-dsn <dsn>", err, dockerDesktopContext)
+		}
+		return fmt.Errorf("Docker default context failed: %w. Start Docker Desktop or Docker Engine, fix access to the Docker daemon socket, add your user to the docker group for system Docker, or pass --postgres-source existing --postgres-dsn <dsn>", err)
+	}
+	if contextName == dockerDesktopContext && isDockerDaemonAccessError(err) {
+		return fmt.Errorf("Docker context %q failed: %w. Start Docker Desktop and rerun setup, or pass --postgres-source existing --postgres-dsn <dsn>", contextName, err)
+	}
+	return err
+}
+
+func isDockerDaemonAccessError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"/var/run/docker.sock",
+		"permission denied",
+		"cannot connect to the docker daemon",
+		"is the docker daemon running",
+		"docker daemon is not running",
+		"docker_engine",
+		"error during connect",
+		"access is denied",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c dockerComposeCommand) run(ctx context.Context, runner commandRunner, cfg dockerPostgresConfig, args ...string) ([]byte, error) {

@@ -90,8 +90,10 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	postgresDSN := fs.String("postgres-dsn", "", "Postgres DSN for local-shared setup")
 	postgresDriver := fs.String("postgres-driver", "", "Postgres database/sql driver for local-shared setup")
 	postgresSource := fs.String("postgres-source", postgresSourceAuto, "Local Shared Postgres source: auto, docker, existing, or supabase")
+	dockerContextDefault := configuredDockerContext()
 	dockerPostgresPort := fs.Int("docker-postgres-port", configuredDockerPostgresPort(), "host port for Docker-managed Local Shared Postgres")
 	dockerPostgresImage := fs.String("docker-postgres-image", configuredDockerPostgresImage(), "Docker image for Docker-managed Local Shared pgvector Postgres")
+	dockerContext := fs.String("docker-context", dockerContextDefault, "Docker context for Docker-managed Local Shared Postgres: context name or auto")
 	apply := fs.Bool("apply", false, "apply supported client config instead of only printing it")
 	yes := fs.Bool("yes", false, "accept defaults for non-interactive setup")
 	if err := fs.Parse(args); err != nil {
@@ -136,6 +138,8 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		PostgresSource:      *postgresSource,
 		DockerPostgresPort:  *dockerPostgresPort,
 		DockerPostgresImage: *dockerPostgresImage,
+		DockerContext:       *dockerContext,
+		DockerContextSet:    flagWasSet(fs, "docker-context") || strings.TrimSpace(dockerContextDefault) != "",
 		PrintOnly:           *printOnly,
 		ConfigPath:          path,
 	})
@@ -223,6 +227,16 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		}
 	}
 	return nil
+}
+
+func flagWasSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func printSetupStoreResult(w io.Writer, result setupStoreResult) {

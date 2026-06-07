@@ -33,6 +33,7 @@ type postgresStoreConfig struct {
 type dockerPostgresConfig struct {
 	Project     string `json:"project,omitempty"`
 	ComposePath string `json:"compose_path,omitempty"`
+	Context     string `json:"context,omitempty"`
 	Service     string `json:"service,omitempty"`
 	Image       string `json:"image,omitempty"`
 	Host        string `json:"host,omitempty"`
@@ -55,6 +56,8 @@ type setupStoreOptions struct {
 	PostgresSource      string
 	DockerPostgresPort  int
 	DockerPostgresImage string
+	DockerContext       string
+	DockerContextSet    bool
 	PrintOnly           bool
 	ConfigPath          string
 }
@@ -259,6 +262,9 @@ func printStoreSummary(w io.Writer, cfg userConfig) {
 		if cfg.Store.Postgres != nil && cfg.Store.Postgres.Docker != nil {
 			docker := cfg.Store.Postgres.Docker
 			fmt.Fprintf(w, "docker_postgres_project: %s\n", docker.Project)
+			if strings.TrimSpace(docker.Context) != "" {
+				fmt.Fprintf(w, "docker_context: %s\n", docker.Context)
+			}
 			fmt.Fprintf(w, "docker_postgres_image: %s\n", docker.Image)
 			fmt.Fprintf(w, "docker_postgres_port: %d\n", docker.Port)
 			fmt.Fprintf(w, "docker_compose: %s\n", docker.ComposePath)

@@ -81,7 +81,7 @@ tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn pos
 
 All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it; existing Postgres and Supabase setups must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is still deferred. See [.env.example](.env.example).
 
-For the current setup mode map, prerequisites, verification commands, and the inspectable Docker template path, see [Product Tiers](docs/03_product_tiers.md#current-setup-paths).
+For the current setup mode map, prerequisites, verification commands, Docker context troubleshooting, and the inspectable Docker template path, see [Product Tiers](docs/03_product_tiers.md#current-setup-paths) and [Local Shared Troubleshooting](docs/03_product_tiers.md#local-shared-troubleshooting).
 
 Manual HTTP/environment-variable setup is still supported for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set.
 

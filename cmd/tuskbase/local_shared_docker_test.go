@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -23,4 +25,149 @@ func TestDockerComposeYAMLRendersSinglePostgresVolumeTarget(t *testing.T) {
 	if strings.Contains(compose, ":/var/lib/postgresql/data:/var/lib/postgresql/data") {
 		t.Fatalf("compose volume target rendered twice:\n%s", compose)
 	}
+}
+
+func TestDockerComposeCommandUsesSelectedContext(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	compose, err := detectDockerCompose(context.Background(), runner, dockerDesktopContext)
+	if err != nil {
+		t.Fatalf("detectDockerCompose() error = %v", err)
+	}
+	if _, err := compose.run(context.Background(), runner, testDockerPostgresConfig(), "up", "-d"); err != nil {
+		t.Fatalf("compose.run() error = %v", err)
+	}
+	want := "docker --context desktop-linux compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d"
+	if !runner.called(want) {
+		t.Fatalf("missing command %q; calls=%v", want, runner.calls)
+	}
+}
+
+func TestDockerDefaultSocketFailureSuggestsDesktopContext(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	runner.fail("docker compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d", errors.New("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"))
+	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	_, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: testDockerPostgresConfig(), Password: "secret"})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want Docker context hint")
+	}
+	got := err.Error()
+	for _, want := range []string{"--docker-context desktop-linux", "did not switch contexts automatically"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Provision() error missing %q: %v", want, err)
+		}
+	}
+	if runner.called("docker --context desktop-linux compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d") {
+		t.Fatalf("default setup silently switched to desktop context; calls=%v", runner.calls)
+	}
+}
+
+func TestDockerContextAutoSelectsDesktopLinuxWhenDefaultFails(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	runner.fail("docker info", errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"))
+	cfg := testDockerPostgresConfig()
+	cfg.Context = dockerContextAuto
+	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	result, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Config.Context != dockerDesktopContext {
+		t.Fatalf("resolved context = %q, want %q", result.Config.Context, dockerDesktopContext)
+	}
+	want := "docker --context desktop-linux compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d"
+	if !runner.called(want) {
+		t.Fatalf("missing command %q; calls=%v", want, runner.calls)
+	}
+}
+
+func TestDockerContextAutoKeepsStandaloneDockerCompose(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	runner.fail("docker compose version", errors.New(`exec: "docker": executable file not found in $PATH`))
+	runner.fail("docker info", errors.New(`exec: "docker": executable file not found in $PATH`))
+	runner.fail("docker --context desktop-linux info", errors.New(`exec: "docker": executable file not found in $PATH`))
+	cfg := testDockerPostgresConfig()
+	cfg.Context = dockerContextAuto
+	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	result, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if result.Config.Context != "" {
+		t.Fatalf("resolved context = %q, want empty standalone docker-compose context", result.Config.Context)
+	}
+	if runner.called("docker info") {
+		t.Fatalf("auto mode should not require docker CLI after finding standalone docker-compose; calls=%v", runner.calls)
+	}
+	want := "docker-compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d"
+	if !runner.called(want) {
+		t.Fatalf("missing command %q; calls=%v", want, runner.calls)
+	}
+}
+
+func TestDockerDesktopUnavailableSuggestsStartOrExistingPostgres(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	runner.fail("docker --context desktop-linux info", errors.New("Cannot connect to the Docker daemon at unix:///Users/example/.docker/run/docker.sock"))
+	cfg := testDockerPostgresConfig()
+	cfg.Context = dockerDesktopContext
+	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	_, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
+	if err == nil {
+		t.Fatal("Provision() error = nil, want Docker Desktop guidance")
+	}
+	got := err.Error()
+	for _, want := range []string{"start Docker Desktop", "--postgres-source existing --postgres-dsn <dsn>"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("Provision() error missing %q: %v", want, err)
+		}
+	}
+}
+
+func testDockerPostgresConfig() dockerPostgresConfig {
+	return dockerPostgresConfig{
+		Project:     "tuskbase-test",
+		ComposePath: "/tmp/tuskbase-compose.yml",
+		Service:     "postgres",
+		Image:       "pgvector/pgvector:pg16",
+		Host:        "127.0.0.1",
+		Port:        8766,
+		Database:    "tuskbase",
+		User:        "tuskbase",
+		Volume:      "tuskbase-test-postgres",
+	}
+}
+
+type scriptedCommandRunner struct {
+	calls []string
+	errs  map[string]error
+}
+
+func newScriptedCommandRunner() *scriptedCommandRunner {
+	return &scriptedCommandRunner{errs: map[string]error{}}
+}
+
+func (r *scriptedCommandRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	call := commandLine(name, args...)
+	r.calls = append(r.calls, call)
+	if err := r.errs[call]; err != nil {
+		return nil, err
+	}
+	return []byte("ok"), nil
+}
+
+func (r *scriptedCommandRunner) fail(call string, err error) {
+	r.errs[call] = err
+}
+
+func (r *scriptedCommandRunner) called(want string) bool {
+	for _, call := range r.calls {
+		if call == want {
+			return true
+		}
+	}
+	return false
+}
+
+func commandLine(name string, args ...string) string {
+	parts := append([]string{name}, args...)
+	return strings.Join(parts, " ")
 }
