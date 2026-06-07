@@ -138,7 +138,7 @@ func TestEnvExampleDocumentsSupportedVariables(t *testing.T) {
 		t.Fatalf("read .env.example: %v", err)
 	}
 	got := string(data)
-	for _, want := range []string{"TUSKBASE_API_KEY", "TUSKBASE_AGENT_KEYS", "TUSKBASE_ADDR", "TUSKBASE_STORE", "TUSKBASE_DB_PATH", "TUSKBASE_POSTGRES_DSN", "TUSKBASE_POSTGRES_DRIVER", "TUSKBASE_DOCKER_POSTGRES_IMAGE", "TUSKBASE_DOCKER_POSTGRES_PORT", "TUSKBASE_CONFIG_PATH", "OPENAI_API_KEY"} {
+	for _, want := range []string{"TUSKBASE_API_KEY", "TUSKBASE_AGENT_KEYS", "TUSKBASE_ADDR", "TUSKBASE_STORE", "TUSKBASE_DB_PATH", "TUSKBASE_POSTGRES_DSN", "TUSKBASE_POSTGRES_DRIVER", "TUSKBASE_DOCKER_POSTGRES_IMAGE", "TUSKBASE_DOCKER_POSTGRES_PORT", "TUSKBASE_DOCKER_CONTEXT", "TUSKBASE_CONFIG_PATH", "OPENAI_API_KEY"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf(".env.example missing %q", want)
 		}
@@ -244,6 +244,28 @@ func TestSetupLocalSharedDefaultsToDockerPostgres(t *testing.T) {
 	}
 }
 
+func TestSetupLocalSharedDockerContextStoredAndPrinted(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"setup", "--mode", "local-shared", "--yes", "--docker-context", "desktop-linux"}, &out, &errb); err != nil {
+		t.Fatalf("setup local-shared docker context error = %v", err)
+	}
+	cfg, found, err := loadUserConfig()
+	if err != nil {
+		t.Fatalf("loadUserConfig() error = %v", err)
+	}
+	if !found {
+		t.Fatal("loadUserConfig() found = false")
+	}
+	if cfg.Store.Postgres == nil || cfg.Store.Postgres.Docker == nil || cfg.Store.Postgres.Docker.Context != "desktop-linux" {
+		t.Fatalf("docker config = %+v", cfg.Store)
+	}
+	if !strings.Contains(out.String(), "docker_context: desktop-linux") {
+		t.Fatalf("setup output = %q", out.String())
+	}
+}
+
 func TestSetupLocalSharedDockerPrintOnlyDoesNotWriteCompose(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "config.json")
@@ -282,6 +304,28 @@ func TestLoadRuntimeConfigUsesPostgresStoreFromConfig(t *testing.T) {
 	}
 	if got := cfg.Auth.Name(); got != "local-shared-keys" {
 		t.Fatalf("auth policy = %q, want local-shared-keys", got)
+	}
+}
+
+func TestDoctorReportsIncompleteLocalSharedConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	t.Setenv("TUSKBASE_API_KEY", "")
+	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	t.Setenv("TUSKBASE_POSTGRES_DSN", "")
+	t.Setenv("TUSKBASE_STORE", "")
+	if err := saveUserConfig(path, userConfig{Mode: modeLocalShared, Addr: defaultAddr, AgentKeys: []daemon.LocalSharedKey{{Name: "codex", Role: "agent", Key: "secret"}}}); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"doctor"}, &out, &errb); err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"setup_state: incomplete", "auth-only Local Shared config", "postgres_dsn: missing"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("doctor output missing %q: %s", want, got)
+		}
 	}
 }
 

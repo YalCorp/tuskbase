@@ -173,6 +173,79 @@ docker compose up -d
 Manual template use is optional. The normal product path remains
 `tuskbase setup --mode local-shared --yes`.
 
+## Local Shared Troubleshooting
+
+A successful Docker-managed Local Shared setup should include these lines in the
+setup summary:
+
+```text
+store: postgres
+postgres_source: docker
+postgres_dsn: configured
+docker_postgres: ready
+```
+
+If `--docker-context desktop-linux` or `TUSKBASE_DOCKER_CONTEXT=desktop-linux`
+was selected, the summary should also include:
+
+```text
+docker_context: desktop-linux
+```
+
+Useful diagnostics:
+
+```bash
+tuskbase version
+tuskbase doctor
+tuskbase status
+docker compose version
+docker context ls
+```
+
+If setup output only shows Local Shared auth/key changes and does not show the
+store/Postgres lines above, the installed `tuskbase` binary may be stale. Update
+or reinstall the current binary, confirm it with `tuskbase version`, and rerun:
+
+```bash
+tuskbase setup --mode local-shared --yes
+```
+
+If Docker Compose is installed but setup fails with Docker daemon socket
+permission or no-daemon errors, first decide which Docker daemon you want
+Tuskbase to use. Tuskbase does not silently switch Docker contexts. When Docker
+Desktop is running and `desktop-linux` is reachable, rerun explicitly:
+
+```bash
+tuskbase setup --mode local-shared --docker-context desktop-linux --yes
+```
+
+You can also opt into automatic context selection:
+
+```bash
+tuskbase setup --mode local-shared --docker-context auto --yes
+```
+
+`auto` checks the current/default Docker context first, then uses
+`desktop-linux` only when that context is reachable. The environment equivalent
+is `TUSKBASE_DOCKER_CONTEXT=desktop-linux` or `TUSKBASE_DOCKER_CONTEXT=auto`.
+If neither is set, Tuskbase preserves normal Docker behavior, including any
+existing `DOCKER_CONTEXT` in the user's environment.
+
+For system Docker on Linux, fix daemon socket access by starting Docker Engine
+and adding the current user to the Docker group according to your OS policy,
+then open a new shell and rerun setup. Tuskbase does not delete an old SQLite
+database during Local Shared setup; it remains available for manual recovery.
+
+If Docker is not desired or Docker Desktop is unavailable, bring your own
+pgvector-enabled Postgres DSN instead:
+
+```bash
+tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn <dsn> --yes
+```
+
+Semantic pgvector retrieval remains deferred; Local Shared currently uses
+Postgres as the durable store with deterministic text search.
+
 ## Hosted
 
 Hosted is future-facing.

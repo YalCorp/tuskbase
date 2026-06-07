@@ -212,11 +212,16 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	cfg.DBPath = *dbPath
 	cfg = normalizedDaemonConfig(cfg)
 	store, storeErr := loadRuntimeStoreConfig(cfg.DBPath)
+	incompleteLocalShared := cfg.Mode == modeLocalShared && strings.TrimSpace(store.PostgresDSN) == ""
 	authPolicy, authErr := loadAuthPolicy(cfg.Mode != modeDemo)
 	status := newLifecycleController().Status(ctx, cfg)
 	fmt.Fprintf(stdout, "tuskbase: ok\n")
 	fmt.Fprintf(stdout, "version: %s\n", version)
 	fmt.Fprintf(stdout, "store: %s\n", emptyDefault(store.Type, "unavailable"))
+	if incompleteLocalShared {
+		fmt.Fprintf(stdout, "setup_state: incomplete\n")
+		fmt.Fprintf(stdout, "repair_hint: Local Shared config is missing Postgres settings; older tuskbase binaries may have written auth-only Local Shared config. Update or reinstall tuskbase, then rerun `tuskbase setup --mode local-shared --yes`, or use `--postgres-source existing --postgres-dsn <dsn>`.\n")
+	}
 	if store.Type == storeSQLite {
 		fmt.Fprintf(stdout, "db_path: %s\n", store.SQLitePath)
 	}
@@ -228,6 +233,9 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		}
 		if cfg.Store.Postgres != nil && cfg.Store.Postgres.Docker != nil {
 			docker := cfg.Store.Postgres.Docker
+			if strings.TrimSpace(docker.Context) != "" {
+				fmt.Fprintf(stdout, "docker_context: %s\n", docker.Context)
+			}
 			fmt.Fprintf(stdout, "docker_postgres_image: %s\n", docker.Image)
 			fmt.Fprintf(stdout, "docker_postgres_port: %d\n", docker.Port)
 		}
@@ -550,5 +558,6 @@ Environment:
   TUSKBASE_STORE          Durable store override: sqlite or postgres
   TUSKBASE_POSTGRES_DSN   Postgres DSN for Local Shared
   TUSKBASE_POSTGRES_DRIVER Postgres database/sql driver; defaults to pgx
+  TUSKBASE_DOCKER_CONTEXT Docker context for Local Shared Docker setup; use auto to opt into desktop-linux fallback
 `)
 }
