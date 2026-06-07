@@ -273,10 +273,7 @@ func (c *defaultLifecycleController) waitReady(ctx context.Context, addr string)
 		lastErr = err
 		select {
 		case <-deadlineCtx.Done():
-			if lastErr != nil {
-				return daemon.Health{}, lastErr
-			}
-			return daemon.Health{}, deadlineCtx.Err()
+			return daemon.Health{}, lastErr
 		case <-time.After(c.pollPeriod):
 		}
 	}
@@ -849,7 +846,9 @@ func renderLaunchAgentPlist(exe string, cfg userConfig) string {
   <array>
 `)
 	for _, arg := range args {
-		b.WriteString("    <string>" + html.EscapeString(arg) + "</string>\n")
+		b.WriteString("    <string>")
+		b.WriteString(html.EscapeString(arg))
+		b.WriteString("</string>\n")
 	}
 	b.WriteString(`  </array>
   <key>RunAtLoad</key>
