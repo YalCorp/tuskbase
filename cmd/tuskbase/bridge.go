@@ -137,15 +137,99 @@ func runBridge(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return errors.New("no Tuskbase setup found; run `tuskbase setup` first")
 	}
 	cfg.Addr = *addr
-	if err := newLifecycleController().EnsureReady(ctx, normalizedDaemonConfig(cfg)); err != nil {
-		return err
+	cfg = normalizedDaemonConfig(cfg)
+	if err := newLifecycleController().EnsureReady(ctx, cfg); err != nil {
+		return newBridgeDiagnosticServer(ctx, cfg, err).Run(ctx, &mcp.StdioTransport{})
 	}
 	server, closeRemote, err := newBridgeServer(ctx, "http://"+*addr+"/mcp", credentials, clientName)
 	if err != nil {
-		return err
+		return newBridgeDiagnosticServer(ctx, cfg, err).Run(ctx, &mcp.StdioTransport{})
 	}
 	defer closeRemote()
 	return server.Run(ctx, &mcp.StdioTransport{})
+}
+
+type bridgeDiagnosticInput struct{}
+
+type bridgeDiagnosticOutput struct {
+	Status          string `json:"status"`
+	Mode            string `json:"mode"`
+	Store           string `json:"store,omitempty"`
+	Detail          string `json:"detail"`
+	PostgresConnect string `json:"postgres_connect,omitempty"`
+	PostgresError   string `json:"postgres_error,omitempty"`
+	RepairHint      string `json:"repair_hint,omitempty"`
+	FallbackHint    string `json:"fallback_hint,omitempty"`
+	LogPath         string `json:"log_path,omitempty"`
+}
+
+func newBridgeDiagnosticServer(ctx context.Context, cfg userConfig, cause error) *mcp.Server {
+	server := mcp.NewServer(&mcp.Implementation{Name: "tuskbase-bridge-diagnostics", Version: version}, nil)
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_diagnostics",
+		Description: "Explain why Tuskbase memory tools are unavailable and show local repair commands.",
+	}, func(context.Context, *mcp.CallToolRequest, bridgeDiagnosticInput) (*mcp.CallToolResult, bridgeDiagnosticOutput, error) {
+		out := bridgeDiagnostic(ctx, cfg, cause)
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: bridgeDiagnosticText(out)}}}, out, nil
+	})
+	return server
+}
+
+func bridgeDiagnostic(ctx context.Context, cfg userConfig, cause error) bridgeDiagnosticOutput {
+	out := bridgeDiagnosticOutput{
+		Status:  "not-ready",
+		Mode:    emptyDefault(cfg.Mode, modeLocalBasic),
+		Detail:  cause.Error(),
+		LogPath: defaultDaemonLogPath(),
+	}
+	store, err := loadRuntimeStoreConfig(cfg.DBPath)
+	if err != nil {
+		out.Store = "unavailable"
+		out.RepairHint = err.Error()
+		return out
+	}
+	out.Store = store.Type
+	check := checkRuntimeStore(ctx, cfg, store)
+	if check.Checked && !check.Ready {
+		out.PostgresConnect = check.Status
+		out.PostgresError = check.Error
+		out.RepairHint = check.RepairHint
+		out.FallbackHint = check.FallbackHint
+		return out
+	}
+	if isDockerManagedLocalShared(cfg) {
+		out.RepairHint = "Start Docker Desktop or Docker Engine, confirm Local Shared Postgres is running on the configured port, then run `tuskbase daemon restart`."
+		out.FallbackHint = "Use `tuskbase setup --mode local-basic --yes` to switch this machine back to SQLite without deleting the Local Shared Docker volume."
+		return out
+	}
+	out.RepairHint = "Run `tuskbase doctor` and inspect the daemon log for details."
+	return out
+}
+
+func bridgeDiagnosticText(out bridgeDiagnosticOutput) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Tuskbase is not ready.\n")
+	fmt.Fprintf(&b, "mode: %s\n", out.Mode)
+	if out.Store != "" {
+		fmt.Fprintf(&b, "store: %s\n", out.Store)
+	}
+	if out.PostgresConnect != "" {
+		fmt.Fprintf(&b, "postgres_connect: %s\n", out.PostgresConnect)
+	}
+	if out.PostgresError != "" {
+		fmt.Fprintf(&b, "postgres_error: %s\n", out.PostgresError)
+	}
+	fmt.Fprintf(&b, "detail: %s\n", out.Detail)
+	if out.RepairHint != "" {
+		fmt.Fprintf(&b, "repair_hint: %s\n", out.RepairHint)
+	}
+	if out.FallbackHint != "" {
+		fmt.Fprintf(&b, "fallback_hint: %s\n", out.FallbackHint)
+	}
+	if out.LogPath != "" {
+		fmt.Fprintf(&b, "log_path: %s\n", out.LogPath)
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func newBridgeServer(ctx context.Context, endpoint string, credentials CredentialProvider, clientName string) (*mcp.Server, func() error, error) {

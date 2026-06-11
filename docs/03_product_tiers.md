@@ -133,7 +133,7 @@ Recommended setup paths:
 
 | Path | Best for | Notes |
 |---|---|---|
-| Docker-managed pgvector Postgres | fully local shared setup | default when no DSN is supplied; user needs Docker Compose |
+| Docker-managed pgvector Postgres | fully local shared setup | default when no DSN is supplied; user needs Docker Compose running during setup and normal use |
 | Supabase Postgres | managed Postgres path | usable with `--postgres-source supabase --postgres-dsn`; repo memory leaves the machine |
 | Existing Postgres | advanced users | usable with `--postgres-source existing --postgres-dsn` or `TUSKBASE_POSTGRES_DSN` |
 
@@ -185,6 +185,8 @@ postgres_dsn: configured
 docker_postgres: ready
 ```
 
+Docker-managed Local Shared depends on Docker/Postgres at runtime, not only during setup. If Docker is closed or the configured Postgres credentials no longer match the database volume, the daemon cannot start and MCP clients may report that the Tuskbase server closed during initialization. `tuskbase doctor` validates the configured Postgres DSN directly and prints `store_runtime`, `postgres_connect`, and repair hints.
+
 If `--docker-context desktop-linux` or `TUSKBASE_DOCKER_CONTEXT=desktop-linux`
 was selected, the summary should also include:
 
@@ -235,6 +237,15 @@ For system Docker on Linux, fix daemon socket access by starting Docker Engine
 and adding the current user to the Docker group according to your OS policy,
 then open a new shell and rerun setup. Tuskbase does not delete an old SQLite
 database during Local Shared setup; it remains available for manual recovery.
+
+If `tuskbase doctor` reports `postgres_connect: auth-failed` for a Docker-managed setup, Docker is reachable but Postgres rejected the configured password. This usually means an existing Docker volume was reused after config or setup changed. Rerun setup with the current binary to reconcile the Tuskbase-owned container password:
+
+```bash
+tuskbase setup --mode local-shared --yes
+tuskbase daemon restart
+```
+
+If you know the existing database password, you can keep it explicitly with `--postgres-source existing --postgres-dsn <dsn>`. Do not remove the Docker volume unless you intentionally want to discard Local Shared memory.
 
 If Docker is not desired or Docker Desktop is unavailable, bring your own
 pgvector-enabled Postgres DSN instead:

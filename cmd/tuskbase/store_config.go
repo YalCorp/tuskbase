@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -64,6 +65,15 @@ type setupStoreOptions struct {
 
 type setupStoreResult struct {
 	DockerPostgres *dockerPostgresProvisionResult
+}
+
+type storeRuntimeCheck struct {
+	Checked      bool
+	Ready        bool
+	Status       string
+	Error        string
+	RepairHint   string
+	FallbackHint string
 }
 
 func applySetupStoreConfig(cfg *userConfig, opts setupStoreOptions) (setupStoreResult, error) {
@@ -164,6 +174,24 @@ func normalizePostgresSource(value string) (string, error) {
 	}
 }
 
+func runtimeStoreConfigFromUserConfig(cfg userConfig) runtimeStoreConfig {
+	store := runtimeStoreConfig{Type: defaultStoreTypeForMode(cfg.Mode), SQLitePath: cfg.DBPath, PostgresDriver: defaultPostgresDriver}
+	if cfg.Store.Type != "" {
+		store.Type = cfg.Store.Type
+	}
+	if cfg.Store.Postgres != nil {
+		store.PostgresDriver = cfg.Store.Postgres.Driver
+		store.PostgresDSN = cfg.Store.Postgres.DSN
+	}
+	if strings.TrimSpace(store.SQLitePath) == "" {
+		store.SQLitePath = defaultDBPath()
+	}
+	if strings.TrimSpace(store.PostgresDriver) == "" {
+		store.PostgresDriver = defaultPostgresDriver
+	}
+	return store
+}
+
 func loadRuntimeStoreConfig(dbPath string) (runtimeStoreConfig, error) {
 	store := runtimeStoreConfig{Type: storeSQLite, SQLitePath: dbPath, PostgresDriver: defaultPostgresDriver}
 	if cfg, found, err := loadUserConfig(); err != nil {
@@ -229,6 +257,41 @@ func normalizeStoreType(value string) (string, error) {
 
 func hasPostgresDSN(cfg userConfig) bool {
 	return cfg.Store.Type == storePostgres && cfg.Store.Postgres != nil && strings.TrimSpace(cfg.Store.Postgres.DSN) != ""
+}
+
+func isDockerManagedLocalShared(cfg userConfig) bool {
+	return cfg.Mode == modeLocalShared &&
+		cfg.Store.Type == storePostgres &&
+		cfg.Store.Postgres != nil &&
+		cfg.Store.Postgres.Source == postgresSourceDocker &&
+		cfg.Store.Postgres.Docker != nil
+}
+
+func checkRuntimeStore(ctx context.Context, cfg userConfig, store runtimeStoreConfig) storeRuntimeCheck {
+	if store.Type != storePostgres || strings.TrimSpace(store.PostgresDSN) == "" {
+		return storeRuntimeCheck{}
+	}
+	err := verifyPostgresDSN(ctx, store.PostgresDSN)
+	if err == nil {
+		return storeRuntimeCheck{Checked: true, Ready: true, Status: "ok"}
+	}
+	check := storeRuntimeCheck{Checked: true, Ready: false, Status: "connect-failed", Error: err.Error()}
+	if isPostgresAuthError(err) {
+		check.Status = "auth-failed"
+	}
+	if isDockerManagedLocalShared(cfg) {
+		switch check.Status {
+		case "auth-failed":
+			check.RepairHint = "Docker Postgres is running but rejected the configured Tuskbase password; an existing Docker volume may have an older password. Rerun `tuskbase setup --mode local-shared --yes` with the current binary to reconcile the Tuskbase-owned Docker password, or provide the existing password with `--postgres-source existing --postgres-dsn <dsn>`."
+		default:
+			check.RepairHint = "Start Docker Desktop or Docker Engine, confirm the Local Shared Postgres container is running, then run `tuskbase daemon restart`."
+		}
+		check.FallbackHint = "Use `tuskbase setup --mode local-basic --yes` to switch this machine back to SQLite without deleting the Local Shared Docker volume."
+		return check
+	}
+	check.RepairHint = "Check the configured Postgres DSN, credentials, network access, and pgvector-enabled database, then run `tuskbase daemon restart`."
+	check.FallbackHint = "Use `tuskbase setup --mode local-basic --yes` for a single-machine SQLite setup."
+	return check
 }
 
 func secretStatus(value string) string {

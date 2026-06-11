@@ -72,6 +72,8 @@ Local Shared now has three setup entry points. The out-of-the-box path requires 
 tuskbase setup --mode local-shared --yes
 ```
 
+For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. If Docker Desktop or Docker Engine is stopped, or if an existing Docker volume rejects the configured password after setup changes, Tuskbase MCP will be unavailable until the dependency is repaired. Run `tuskbase doctor` for `store_runtime`, `postgres_connect`, and repair hints before debugging MCP client config.
+
 Existing Postgres and Supabase users can bring their own DSN instead:
 
 ```bash
@@ -92,6 +94,8 @@ tuskbase status
 tuskbase doctor
 tuskbase daemon restart
 ```
+
+If an MCP client reports that Tuskbase closed during initialization, check `tuskbase doctor` first. For Local Shared Docker setups, the most common causes are Docker/Postgres not running on the configured port or a reused Docker volume whose stored database password no longer matches Tuskbase config.
 
 For repository development or previewing generated output without installing autostart, `go run` is still useful:
 

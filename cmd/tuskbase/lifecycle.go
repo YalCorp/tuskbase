@@ -121,6 +121,9 @@ func (c *defaultLifecycleController) EnsureReady(ctx context.Context, cfg userCo
 	} else if isBadHealth(err) {
 		return fmt.Errorf("Tuskbase daemon health check failed at http://%s/healthz: %w; log: %s", cfg.Addr, err, c.logPath())
 	}
+	if err := c.checkRuntimeDependencies(ctx, cfg); err != nil {
+		return fmt.Errorf("%w; log: %s", err, c.logPath())
+	}
 
 	lock, err := c.acquireLock(ctx)
 	if err != nil {
@@ -132,6 +135,9 @@ func (c *defaultLifecycleController) EnsureReady(ctx context.Context, cfg userCo
 		return nil
 	} else if isBadHealth(err) {
 		return fmt.Errorf("Tuskbase daemon health check failed at http://%s/healthz: %w; log: %s", cfg.Addr, err, c.logPath())
+	}
+	if err := c.checkRuntimeDependencies(ctx, cfg); err != nil {
+		return fmt.Errorf("%w; log: %s", err, c.logPath())
 	}
 
 	return c.startOrWake(ctx, cfg)
@@ -277,6 +283,22 @@ func (c *defaultLifecycleController) waitReady(ctx context.Context, addr string)
 		case <-time.After(c.pollPeriod):
 		}
 	}
+}
+
+func (c *defaultLifecycleController) checkRuntimeDependencies(ctx context.Context, cfg userConfig) error {
+	store := runtimeStoreConfigFromUserConfig(cfg)
+	check := checkRuntimeStore(ctx, cfg, store)
+	if !check.Checked || check.Ready {
+		return nil
+	}
+	message := fmt.Sprintf("Tuskbase store is not ready: postgres_connect=%s: %s", check.Status, check.Error)
+	if check.RepairHint != "" {
+		message += "; " + check.RepairHint
+	}
+	if check.FallbackHint != "" {
+		message += "; " + check.FallbackHint
+	}
+	return errors.New(message)
 }
 
 func (c *defaultLifecycleController) readyHealth(ctx context.Context, addr string) (daemon.Health, error) {
