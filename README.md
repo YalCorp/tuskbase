@@ -4,121 +4,183 @@
 
 **Local-first repo memory for AI coding agents.**
 
-Tuskbase helps coding agents share repo context and decision history before they change code, so each session does not have to rediscover architecture, conventions, or settled decisions from scratch.
+Coding agents are getting good at changing code. They are still bad at remembering why the code is the way it is.
 
-Agents working across the same repo should not silently contradict prior direction. Tuskbase turns that drift into an explicit workflow: look up context, preflight a proposal, remember the final decision, and surface conflicts when new work disagrees with active project direction.
-
-> Project status: first implementation slice. This repository includes a local Go service with temporal decision records, SQLite-backed local storage, a Postgres store adapter package with Local Shared runtime selection, Docker-managed pgvector Postgres provisioning for Local Shared setup, deterministic active-memory lookup, optional OpenAI embeddings, preflight conflict detection, lookup receipts, stdio MCP, loopback HTTP MCP, a self-healing stdio MCP bridge for local daemon auth, user-scope daemon lifecycle helpers for local setup, required local bearer auth for HTTP MCP/REST, auth-derived actor attribution for authenticated writes, local key admin commands, and an optional REST API. UI, SDKs, semantic pgvector retrieval, cloud sync, and packaging wrappers are still deferred.
-
-## How It Works
-
-The core loop is:
+Tuskbase gives agents a shared memory for a repository: decisions, rationale, constraints, conflicts, and lookup receipts. It is built for the moment before an agent edits code, when it should ask: what has this repo already decided?
 
 ```text
 attach -> lookup -> preflight -> remember
 ```
 
-| Step | Purpose |
-|---|---|
-| `attach` | Understand the workspace and repo context. |
-| `lookup` | Retrieve relevant decisions, claims, repo docs, conflicts, and constraints. |
-| `preflight` | Check whether a proposal follows, extends, duplicates, supersedes, or conflicts with prior direction. |
-| `remember` | Store the final decision with reasoning, evidence, claims, files, and relationships. |
+Tuskbase stores decisions, not chat logs. The goal is to make repo context durable enough that the next agent session does not have to rediscover the same architecture, conventions, and tradeoffs from scratch.
 
-## Quick Start
+## Why
 
-Use an installed or stable built `tuskbase` binary for normal local setup. Autostart service installation refuses temporary Go build artifacts, so do not enable autostart from `go run`.
+A common agent failure mode is not bad syntax. It is drift.
+
+One session decides that auth belongs at the daemon boundary. Another session, missing that context, adds bearer-token handling inside every MCP client config. Both changes may look reasonable in isolation. Together, they turn local setup into a mess.
+
+Tuskbase makes that kind of drift explicit:
+
+| Step | Question | Result |
+|---|---|---|
+| `attach` | Which repo am I working in? | Workspace identity and local docs context. |
+| `lookup` | What decisions matter before I edit? | Active decisions, claims, evidence, constraints, and receipts. |
+| `preflight` | Does my plan follow or fight prior direction? | Follows, extends, duplicates, supersedes, or conflicts. |
+| `remember` | What did we decide after the work? | Durable decision record with rationale and evidence. |
+
+## What Works Today
+
+Tuskbase is in its first implementation slice. The current product surface is usable locally, with clear deferred areas.
+
+Implemented now:
+
+- Go CLI for setup, diagnostics, daemon lifecycle, and local key management.
+- MCP tools for `attach`, `lookup`, `preflight`, `remember`, recent decisions, and active conflicts.
+- Demo stdio MCP mode for quick local experiments.
+- Local Basic daemon mode with SQLite, loopback HTTP MCP, and stdio bridge auth.
+- Local Shared mode with Postgres selected from Docker-managed pgvector Postgres, existing Postgres, or Supabase.
+- Deterministic active-memory lookup, preflight conflict detection, lookup receipts, and optional OpenAI embeddings.
+- Local bearer auth for HTTP MCP/REST, auth-derived actor attribution, and named Local Shared agent keys.
+- `tuskbase doctor` and bridge diagnostics for common local setup failures.
+- Optional REST API for local development/debugging.
+
+Deferred:
+
+- UI.
+- SDKs.
+- Semantic pgvector retrieval.
+- Hosted sync.
+- Package-manager wrappers and release-channel polish.
+
+## Install From Source
+
+For normal setup, use an installed or stable built `tuskbase` binary. Autostart service installation intentionally refuses temporary `go run` build artifacts.
 
 ```bash
+go build -o ~/.local/bin/tuskbase ./cmd/tuskbase
 tuskbase version
-tuskbase setup
 ```
 
-Recommended first setup is Local Basic. Tuskbase generates a local secret, stores it in a private user config file, and attempts to install and start a user-scope daemon service. If the service backend is unavailable, setup degrades without failing because `tuskbase bridge` can still start or wake the local daemon when an MCP client connects.
+If `~/.local/bin` is not on your `PATH`, either add it or choose another stable install path.
 
-The Local Basic MCP endpoint is:
-
-```text
-http://127.0.0.1:8765/mcp
-```
-
-Print client-specific MCP setup help. The default client config uses `tuskbase bridge`, so MCP clients do not need `TUSKBASE_API_KEY` in every shell session. Add `--apply` for supported client automation such as Codex.
-
-```bash
-tuskbase connect codex
-tuskbase connect codex --apply
-tuskbase connect claude
-tuskbase connect cursor
-```
-
-> **Important: Codex may show `Auth: Unsupported`.**
-> This is expected for Tuskbase's default local setup because Codex launches
-> `tuskbase bridge` over stdio, and the bridge authenticates to the local daemon
-> internally. It does not mean Tuskbase daemon auth is disabled. Run
-> `tuskbase status` to see daemon health, service state, and the active daemon auth policy.
-
-Manage local auth keys:
-
-```bash
-tuskbase auth list
-tuskbase auth rotate
-tuskbase auth add --name windsurf --role agent
-tuskbase auth rotate --name codex
-```
-
-Local Shared now has three setup entry points. The out-of-the-box path requires Docker Compose and starts a private Postgres+pgvector container on loopback port `8766` by default:
-
-```bash
-tuskbase setup --mode local-shared --yes
-```
-
-For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. If Docker Desktop or Docker Engine is stopped, or if an existing Docker volume rejects the configured password after setup changes, Tuskbase MCP will be unavailable until the dependency is repaired. Run `tuskbase doctor` for `store_runtime`, `postgres_connect`, and repair hints before debugging MCP client config.
-
-Existing Postgres and Supabase users can bring their own DSN instead:
-
-```bash
-tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable
-tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn postgres://...
-```
-
-All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it; existing Postgres and Supabase setups must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is still deferred. See [.env.example](.env.example).
-
-For the current setup mode map, prerequisites, verification commands, Docker context troubleshooting, and the inspectable Docker template path, see [Product Tiers](docs/03_product_tiers.md#current-setup-paths) and [Local Shared Troubleshooting](docs/03_product_tiers.md#local-shared-troubleshooting).
-
-Manual HTTP/environment-variable setup is still supported for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set.
-
-Use diagnostics when recovering a local setup:
-
-```bash
-tuskbase status
-tuskbase doctor
-tuskbase daemon restart
-```
-
-If an MCP client reports that Tuskbase closed during initialization, check `tuskbase doctor` first. For Local Shared Docker setups, the most common causes are Docker/Postgres not running on the configured port or a reused Docker volume whose stored database password no longer matches Tuskbase config.
-
-For repository development or previewing generated output without installing autostart, `go run` is still useful:
+For repository development or preview-only commands, `go run` is still useful:
 
 ```bash
 go run ./cmd/tuskbase version
 go run ./cmd/tuskbase setup --print-only
 ```
 
-The REST API is optional and is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging after setup:
+## Quick Start
+
+Recommended first setup is Local Basic: one local daemon, SQLite storage, MCP bridge auth, no Docker.
+
+```bash
+tuskbase setup
+tuskbase connect codex --apply
+tuskbase status
+```
+
+The default MCP client config uses `tuskbase bridge`, so Codex, Claude, Cursor, and other local clients do not need `TUSKBASE_API_KEY` exported in every shell.
+
+Print client-specific setup commands:
+
+```bash
+tuskbase connect codex
+tuskbase connect claude
+tuskbase connect cursor
+```
+
+Codex may show `Auth: Unsupported` for Tuskbase. That is expected for the default stdio bridge path: Codex launches `tuskbase bridge`, and the bridge authenticates to the local daemon internally. It does not mean daemon auth is disabled. Check the active policy with:
+
+```bash
+tuskbase status
+```
+
+## Setup Modes
+
+| Mode | Store | Best For | Infrastructure |
+|---|---|---|---|
+| Demo | SQLite | Trying MCP tools with the least ceremony | None |
+| Local Basic | SQLite | One developer using local agents on one machine | Local daemon |
+| Local Shared | Postgres + pgvector extension | Heavier local multi-agent use or shared local memory | Docker, existing Postgres, or Supabase |
+
+Local Basic is the default:
+
+```bash
+tuskbase setup
+```
+
+Local Shared with Docker-managed pgvector Postgres:
+
+```bash
+tuskbase setup --mode local-shared --yes
+```
+
+Local Shared with your own database:
+
+```bash
+tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable
+tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn postgres://...
+```
+
+All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it. Existing Postgres and Supabase setups must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is still deferred.
+
+For the full setup matrix, Docker context notes, and inspectable templates, see [Product Tiers](docs/03_product_tiers.md#current-setup-paths) and [Local Shared Troubleshooting](docs/03_product_tiers.md#local-shared-troubleshooting).
+
+## Daily Commands
+
+```bash
+tuskbase status
+tuskbase doctor
+tuskbase daemon restart
+tuskbase auth list
+tuskbase auth rotate
+tuskbase auth add --name windsurf --role agent
+tuskbase auth rotate --name codex
+```
+
+Manual HTTP/environment-variable setup is available for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set. See [.env.example](.env.example).
+
+## Troubleshooting
+
+Start with:
+
+```bash
+tuskbase doctor
+tuskbase status
+```
+
+If an MCP client reports that Tuskbase closed during initialization, check `tuskbase doctor` before debugging client config. For Docker-managed Local Shared setups, common causes are:
+
+- Docker Desktop or Docker Engine is not running.
+- Postgres is not reachable on the configured loopback port.
+- An existing Docker volume has a stored database password that no longer matches Tuskbase config.
+
+Newer Tuskbase builds report these as `store_runtime`, `postgres_connect`, and repair hints in `doctor` output. The bridge also exposes a `tuskbase_diagnostics` tool when daemon-backed MCP tools cannot be reached.
+
+For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. Local Basic does not require Docker.
+
+## Current Interfaces
+
+### MCP
+
+| Tool | Purpose |
+|---|---|
+| `tuskbase_attach` | Attach or refresh repo workspace context. |
+| `tuskbase_lookup` | Retrieve relevant active decisions, claims, evidence, and docs before editing. |
+| `tuskbase_preflight` | Classify whether a proposal follows, extends, duplicates, supersedes, or conflicts with active decisions. |
+| `tuskbase_remember` | Store a completed decision with rationale, evidence, claims, and relationships. |
+| `tuskbase_recent` | Show recent active decisions for a workspace. |
+| `tuskbase_conflicts` | Show active conflicts for a workspace. |
+
+### Optional REST API
+
+The REST API is not mounted by the default Local Basic daemon. Enable it explicitly only for local development/debugging:
 
 ```bash
 tuskbase serve --http-mcp --rest
 ```
-
-## Current Interfaces
-
-The first product surface is MCP. Tuskbase currently supports stdio MCP for Demo mode, loopback HTTP MCP for daemon mode, and a stdio bridge that lets local MCP clients use Tuskbase-managed credentials without storing bearer tokens in client config. For Local Basic and Local Shared setup, Tuskbase attempts to install a user-scope daemon autostart service; the bridge also checks `/healthz` and starts or wakes the daemon before MCP initialization when the daemon is down. Some MCP clients may label stdio bridge auth as unsupported because the client itself is not managing the bearer token; Tuskbase daemon auth is still enforced behind the bridge.
-
-The current runtime is a Go local service backed by local SQLite storage by default. Packaging wrappers such as npm, Homebrew, or GitHub release binaries remain distribution conveniences.
-
-A UI can come after the API and MCP flows are useful. SDKs can come after the core contracts are stable. The CLI exists as a guided front door for setup, diagnostics, and daemon operation.
-
-### Optional REST API
 
 | Capability | Purpose |
 |---|---|
@@ -129,17 +191,6 @@ A UI can come after the API and MCP flows are useful. SDKs can come after the co
 | Recent decisions | List recent decisions for a workspace. |
 | Active conflicts | List active conflicts for a workspace. |
 | Health and status | Report local server, adapter, and indexing health. |
-
-### MCP
-
-| Tool | Purpose |
-|---|---|
-| `tuskbase_attach` | Attach or refresh repo workspace context when exposed to agents. |
-| `tuskbase_lookup` | Retrieve context before an agent acts. |
-| `tuskbase_preflight` | Detect proposal relationships and conflicts. |
-| `tuskbase_remember` | Store a completed decision. |
-| `tuskbase_recent` | Show recent decisions for the workspace. |
-| `tuskbase_conflicts` | Show active conflicts for the workspace. |
 
 ## Architecture Direction
 
@@ -155,9 +206,29 @@ HTTP API / MCP / later UI / later SDKs / optional support CLI
         -> replaceable adapters
 ```
 
-The domain and application layers should depend on explicit ports such as `EntryStore`, `GraphStore`, `VectorIndex`, `DocumentStore`, `ReceiptStore`, `ConflictStore`, and `EmbeddingProvider`. Concrete technologies belong at the composition root and adapter layer.
+Canonical decision writes must not depend on derived indexes, embeddings, or network services. SQLite is the default local adapter because the first experience should be easy to run on a developer machine. Postgres is available behind the same boundaries for Local Shared setups. Search indexes are derived and rebuildable. Indexing failures must not cause a decision to be lost.
 
-SQLite is the default durable local adapter because Tuskbase should be easy to run on a developer machine. A Postgres store adapter now exists behind the same ports for shared/team deployments, and Local Shared can select it at runtime from a Docker-managed pgvector Postgres instance or a configured DSN. It is still an adapter rather than product identity. Canonical records live behind store interfaces. Search indexes are derived and rebuildable. Indexing failures must not cause a decision to be lost.
+## Contributing
+
+Tuskbase is early, so good contributions are especially concrete:
+
+- Keep docs honest about what exists today.
+- Prefer local-first flows that work without cloud services.
+- Keep domain/application behavior independent from infrastructure adapters.
+- Add focused tests beside changed code.
+- Run the default offline suite before broad changes:
+
+```bash
+go test ./...
+```
+
+For setup or daemon work, also run:
+
+```bash
+go test ./cmd/tuskbase ./internal/daemon
+```
+
+See [Agent Guide](AGENTS.md) for repo-specific development instructions.
 
 ## Docs
 
@@ -170,7 +241,6 @@ SQLite is the default durable local adapter because Tuskbase should be easy to r
 | [Auth And Security](docs/04_auth_security.md) | Tiered auth, identity, and security direction. |
 | [Security](SECURITY.md) | Vulnerability reporting and current security posture. |
 | [Changelog](CHANGELOG.md) | Release notes and notable project changes. |
-| [Agent Guide](AGENTS.md) | Instructions for AI coding agents working in this repo. |
 
 ## License
 
