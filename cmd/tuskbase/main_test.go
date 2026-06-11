@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -329,6 +330,43 @@ func TestDoctorReportsIncompleteLocalSharedConfig(t *testing.T) {
 	}
 }
 
+func TestDoctorReportsPostgresAuthFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	t.Setenv("TUSKBASE_API_KEY", "")
+	t.Setenv("TUSKBASE_AGENT_KEYS", "")
+	t.Setenv("TUSKBASE_POSTGRES_DSN", "")
+	t.Setenv("TUSKBASE_STORE", "")
+	oldVerify := verifyPostgresDSN
+	verifyPostgresDSN = func(context.Context, string) error {
+		return errors.New(`failed SASL auth: FATAL: password authentication failed for user "tuskbase" (SQLSTATE 28P01)`)
+	}
+	t.Cleanup(func() { verifyPostgresDSN = oldVerify })
+	if err := saveUserConfig(path, userConfig{
+		Mode:      modeLocalShared,
+		Addr:      defaultAddr,
+		AgentKeys: []daemon.LocalSharedKey{{Name: "codex", Role: "agent", Key: "secret"}},
+		Store: storeConfig{Type: storePostgres, Postgres: &postgresStoreConfig{
+			Source: postgresSourceDocker,
+			Driver: defaultPostgresDriver,
+			DSN:    "postgres://tuskbase:secret@127.0.0.1:8766/tuskbase?sslmode=disable",
+			Docker: &dockerPostgresConfig{Host: "127.0.0.1", Port: 8766, Image: defaultDockerPostgresImage},
+		}},
+	}); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"doctor"}, &out, &errb); err != nil {
+		t.Fatalf("doctor error = %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"store_runtime: not-ready", "postgres_connect: auth-failed", "existing Docker volume", "tuskbase setup --mode local-basic --yes"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("doctor output missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestLoadRuntimeConfigRequiresPostgresDSNForStoredLocalShared(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.json")
 	t.Setenv("TUSKBASE_CONFIG_PATH", path)
@@ -600,6 +638,60 @@ func TestLocalSharedBridgeMissingClientFailsClearly(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "tuskbase auth add --name cursor") {
 		t.Fatalf("missing client error = %v", err)
 	}
+}
+
+func TestBridgeDiagnosticServerExposesPostgresAuthFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("TUSKBASE_CONFIG_PATH", filepath.Join(root, "config.json"))
+	oldVerify := verifyPostgresDSN
+	verifyPostgresDSN = func(context.Context, string) error {
+		return errors.New(`failed SASL auth: FATAL: password authentication failed for user "tuskbase" (SQLSTATE 28P01)`)
+	}
+	t.Cleanup(func() { verifyPostgresDSN = oldVerify })
+	cfg := userConfig{
+		Mode:   modeLocalShared,
+		Addr:   defaultAddr,
+		DBPath: filepath.Join(root, "tuskbase.db"),
+		Store: storeConfig{Type: storePostgres, Postgres: &postgresStoreConfig{
+			Source: postgresSourceDocker,
+			Driver: defaultPostgresDriver,
+			DSN:    "postgres://tuskbase:secret@127.0.0.1:8766/tuskbase?sslmode=disable",
+			Docker: &dockerPostgresConfig{Host: "127.0.0.1", Port: 8766, Image: defaultDockerPostgresImage},
+		}},
+	}
+	if err := saveUserConfig(filepath.Join(root, "config.json"), cfg); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	server := newBridgeDiagnosticServer(ctx, cfg, errors.New("daemon did not become ready"))
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	serverDone := make(chan error, 1)
+	bridgeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() { serverDone <- server.Run(bridgeCtx, serverTransport) }()
+	client := mcp.NewClient(&mcp.Implementation{Name: "diagnostic-test", Version: "v0.0.1"}, nil)
+	session, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("diagnostic client connect error = %v", err)
+	}
+	defer session.Close()
+	tools, err := session.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != "tuskbase_diagnostics" {
+		t.Fatalf("diagnostic tools = %+v", tools.Tools)
+	}
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{Name: "tuskbase_diagnostics"})
+	if err != nil || result.IsError {
+		t.Fatalf("diagnostic call result = %v error = %v", result, err)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || !strings.Contains(text.Text, "postgres_connect: auth-failed") {
+		t.Fatalf("diagnostic text = %#v", result.Content)
+	}
+	cancel()
+	<-serverDone
 }
 
 func runBridgeRememberSmoke(t *testing.T, ctx context.Context, dbPath, clientName, wantActor string) {

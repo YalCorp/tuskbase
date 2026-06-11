@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -42,10 +44,55 @@ func TestDockerComposeCommandUsesSelectedContext(t *testing.T) {
 	}
 }
 
+func TestDockerSetupReusesExistingComposePassword(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "config.json")
+	composePath := filepath.Join(root, "local-shared", "docker-compose.yml")
+	if err := os.MkdirAll(filepath.Dir(composePath), 0o700); err != nil {
+		t.Fatalf("mkdir compose dir: %v", err)
+	}
+	if err := os.WriteFile(composePath, []byte("services:\n  postgres:\n    environment:\n      POSTGRES_PASSWORD: \"existing-secret\"\n"), 0o600); err != nil {
+		t.Fatalf("write compose: %v", err)
+	}
+	cfg := userConfig{Mode: modeLocalShared}
+	_, err := applySetupStoreConfig(&cfg, setupStoreOptions{PostgresSource: postgresSourceDocker, DockerPostgresPort: 8766, DockerPostgresImage: defaultDockerPostgresImage, ConfigPath: configPath})
+	if err != nil {
+		t.Fatalf("applySetupStoreConfig() error = %v", err)
+	}
+	if got := postgresPasswordFromDSN(cfg.Store.Postgres.DSN); got != "existing-secret" {
+		t.Fatalf("postgres password = %q, want existing compose password", got)
+	}
+}
+
+func TestDockerProvisionerRepairsPasswordMismatch(t *testing.T) {
+	runner := newScriptedCommandRunner()
+	attempts := 0
+	provisioner := commandDockerPostgresProvisioner{
+		runner: runner,
+		verifyDSN: func(context.Context, string) error {
+			attempts++
+			if attempts == 1 {
+				return errors.New(`failed SASL auth: FATAL: password authentication failed for user "tuskbase" (SQLSTATE 28P01)`)
+			}
+			return nil
+		},
+	}
+	result, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: testDockerPostgresConfig(), Password: "new-secret"})
+	if err != nil {
+		t.Fatalf("Provision() error = %v", err)
+	}
+	if !strings.Contains(result.Detail, "repaired") {
+		t.Fatalf("Provision() detail = %q, want repaired password detail", result.Detail)
+	}
+	if !runner.calledContaining(`ALTER USER "tuskbase" WITH PASSWORD 'new-secret';`) {
+		t.Fatalf("missing password repair command; calls=%v", runner.calls)
+	}
+}
+
 func TestDockerDefaultSocketFailureSuggestsDesktopContext(t *testing.T) {
 	runner := newScriptedCommandRunner()
 	runner.fail("docker compose -f /tmp/tuskbase-compose.yml --project-name tuskbase-test up -d", errors.New("permission denied while trying to connect to the Docker daemon socket at unix:///var/run/docker.sock"))
-	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	provisioner := testCommandDockerPostgresProvisioner(runner)
 	_, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: testDockerPostgresConfig(), Password: "secret"})
 	if err == nil {
 		t.Fatal("Provision() error = nil, want Docker context hint")
@@ -66,7 +113,7 @@ func TestDockerContextAutoSelectsDesktopLinuxWhenDefaultFails(t *testing.T) {
 	runner.fail("docker info", errors.New("Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"))
 	cfg := testDockerPostgresConfig()
 	cfg.Context = dockerContextAuto
-	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	provisioner := testCommandDockerPostgresProvisioner(runner)
 	result, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
@@ -87,7 +134,7 @@ func TestDockerContextAutoKeepsStandaloneDockerCompose(t *testing.T) {
 	runner.fail("docker --context desktop-linux info", errors.New(`exec: "docker": executable file not found in $PATH`))
 	cfg := testDockerPostgresConfig()
 	cfg.Context = dockerContextAuto
-	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	provisioner := testCommandDockerPostgresProvisioner(runner)
 	result, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
 	if err != nil {
 		t.Fatalf("Provision() error = %v", err)
@@ -109,7 +156,7 @@ func TestDockerDesktopUnavailableSuggestsStartOrExistingPostgres(t *testing.T) {
 	runner.fail("docker --context desktop-linux info", errors.New("Cannot connect to the Docker daemon at unix:///Users/example/.docker/run/docker.sock"))
 	cfg := testDockerPostgresConfig()
 	cfg.Context = dockerDesktopContext
-	provisioner := commandDockerPostgresProvisioner{runner: runner}
+	provisioner := testCommandDockerPostgresProvisioner(runner)
 	_, err := provisioner.Provision(context.Background(), dockerPostgresProvisionRequest{Config: cfg, Password: "secret"})
 	if err == nil {
 		t.Fatal("Provision() error = nil, want Docker Desktop guidance")
@@ -120,6 +167,10 @@ func TestDockerDesktopUnavailableSuggestsStartOrExistingPostgres(t *testing.T) {
 			t.Fatalf("Provision() error missing %q: %v", want, err)
 		}
 	}
+}
+
+func testCommandDockerPostgresProvisioner(runner commandRunner) commandDockerPostgresProvisioner {
+	return commandDockerPostgresProvisioner{runner: runner, verifyDSN: func(context.Context, string) error { return nil }}
 }
 
 func testDockerPostgresConfig() dockerPostgresConfig {
@@ -161,6 +212,15 @@ func (r *scriptedCommandRunner) fail(call string, err error) {
 func (r *scriptedCommandRunner) called(want string) bool {
 	for _, call := range r.calls {
 		if call == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *scriptedCommandRunner) calledContaining(want string) bool {
+	for _, call := range r.calls {
+		if strings.Contains(call, want) {
 			return true
 		}
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
@@ -50,14 +51,6 @@ var newDockerPostgresProvisioner = func() dockerPostgresProvisioner {
 }
 
 func provisionDockerPostgresForSetup(pg postgresStoreConfig, opts setupStoreOptions) (dockerPostgresProvisionResult, error) {
-	password := postgresPasswordFromDSN(pg.DSN)
-	if password == "" {
-		secret, err := generateSecret()
-		if err != nil {
-			return dockerPostgresProvisionResult{}, err
-		}
-		password = secret
-	}
 	root := localSharedDockerRoot(opts.ConfigPath)
 	config := dockerPostgresConfig{
 		Project:     defaultDockerPostgresProject,
@@ -87,6 +80,17 @@ func provisionDockerPostgresForSetup(pg postgresStoreConfig, opts setupStoreOpti
 	}
 	if strings.TrimSpace(config.ComposePath) == "" {
 		config.ComposePath = filepath.Join(root, "docker-compose.yml")
+	}
+	password := postgresPasswordFromDSN(pg.DSN)
+	if password == "" {
+		password = dockerPostgresPasswordFromCompose(config.ComposePath)
+	}
+	if password == "" {
+		secret, err := generateSecret()
+		if err != nil {
+			return dockerPostgresProvisionResult{}, err
+		}
+		password = secret
 	}
 	result := dockerPostgresProvisionResult{
 		Config: config,
@@ -199,6 +203,28 @@ func postgresPasswordFromDSN(dsn string) string {
 	return password
 }
 
+func dockerPostgresPasswordFromCompose(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "POSTGRES_PASSWORD:") {
+			continue
+		}
+		raw := strings.TrimSpace(strings.TrimPrefix(line, "POSTGRES_PASSWORD:"))
+		if raw == "" {
+			return ""
+		}
+		if unquoted, err := strconv.Unquote(raw); err == nil {
+			return unquoted
+		}
+		return strings.Trim(raw, "'\"")
+	}
+	return ""
+}
+
 func postgresDSN(host string, port int, user, password, database string) string {
 	u := url.URL{
 		Scheme: "postgres",
@@ -262,11 +288,15 @@ type commandDockerPostgresProvisioner struct {
 	runner       commandRunner
 	readyTimeout time.Duration
 	pollPeriod   time.Duration
+	verifyDSN    func(context.Context, string) error
 }
 
 func (p commandDockerPostgresProvisioner) Provision(ctx context.Context, req dockerPostgresProvisionRequest) (dockerPostgresProvisionResult, error) {
 	if p.runner == nil {
 		p.runner = execCommandRunner{}
+	}
+	if p.verifyDSN == nil {
+		p.verifyDSN = verifyPostgresDSN
 	}
 	config := req.Config
 	compose, err := detectDockerCompose(ctx, p.runner, config.Context)
@@ -282,6 +312,19 @@ func (p commandDockerPostgresProvisioner) Provision(ctx context.Context, req doc
 	}
 	if _, err := compose.run(ctx, p.runner, config, "exec", "-T", config.Service, "psql", "-v", "ON_ERROR_STOP=1", "-U", config.User, "-d", config.Database, "-c", "CREATE EXTENSION IF NOT EXISTS vector;"); err != nil {
 		return dockerPostgresProvisionResult{}, fmt.Errorf("enable pgvector extension: %w", diagnoseDockerProvisionError(ctx, p.runner, config, err))
+	}
+	dsn := postgresDSN(config.Host, config.Port, config.User, req.Password, config.Database)
+	if err := p.waitDSNReady(ctx, dsn); err != nil {
+		if !isPostgresAuthError(err) {
+			return dockerPostgresProvisionResult{}, diagnoseDockerPostgresDSNError(config, err)
+		}
+		if repairErr := p.reconcilePassword(ctx, compose, config, req.Password); repairErr != nil {
+			return dockerPostgresProvisionResult{}, fmt.Errorf("%w; password repair failed: %v", diagnoseDockerPostgresDSNError(config, err), repairErr)
+		}
+		if err := p.waitDSNReady(ctx, dsn); err != nil {
+			return dockerPostgresProvisionResult{}, diagnoseDockerPostgresDSNError(config, err)
+		}
+		return dockerPostgresProvisionResult{Config: config, Ready: true, Detail: "ready (repaired stored password)"}, nil
 	}
 	return dockerPostgresProvisionResult{Config: config, Ready: true, Detail: "ready"}, nil
 }
@@ -312,6 +355,80 @@ func (p commandDockerPostgresProvisioner) waitReady(ctx context.Context, compose
 		case <-time.After(poll):
 		}
 	}
+}
+
+func (p commandDockerPostgresProvisioner) waitDSNReady(ctx context.Context, dsn string) error {
+	timeout := p.readyTimeout
+	if timeout <= 0 {
+		timeout = 60 * time.Second
+	}
+	poll := p.pollPeriod
+	if poll <= 0 {
+		poll = time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		err := p.verifyDSN(ctx, dsn)
+		if err == nil {
+			return nil
+		}
+		if isPostgresAuthError(err) {
+			return err
+		}
+		lastErr = err
+		if time.Now().After(deadline) {
+			return fmt.Errorf("docker postgres TCP connection did not become ready within %s: %w", timeout, lastErr)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(poll):
+		}
+	}
+}
+
+func (p commandDockerPostgresProvisioner) reconcilePassword(ctx context.Context, compose dockerComposeCommand, cfg dockerPostgresConfig, password string) error {
+	statement := fmt.Sprintf("ALTER USER %s WITH PASSWORD %s;", postgresQuoteIdentifier(cfg.User), postgresQuoteLiteral(password))
+	_, err := compose.run(ctx, p.runner, cfg, "exec", "-T", cfg.Service, "psql", "-v", "ON_ERROR_STOP=1", "-U", cfg.User, "-d", cfg.Database, "-c", statement)
+	return err
+}
+
+var verifyPostgresDSN = verifyPostgresDSNDefault
+
+func verifyPostgresDSNDefault(ctx context.Context, dsn string) error {
+	db, err := sql.Open(defaultPostgresDriver, dsn)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	pingCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return db.PingContext(pingCtx)
+}
+
+func isPostgresAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	detail := strings.ToLower(err.Error())
+	return strings.Contains(detail, "password authentication failed") || strings.Contains(detail, "sqlstate 28p01") || strings.Contains(detail, "failed sasl auth")
+}
+
+func diagnoseDockerPostgresDSNError(cfg dockerPostgresConfig, err error) error {
+	addr := net.JoinHostPort(emptyDefault(cfg.Host, defaultDockerPostgresHost), strconv.Itoa(cfg.Port))
+	if isPostgresAuthError(err) {
+		return fmt.Errorf("Docker-managed Postgres is running at %s, but it rejected the configured Tuskbase password; an existing Docker volume may have been reused with an older password: %w", addr, err)
+	}
+	return fmt.Errorf("Docker-managed Postgres did not accept the configured Tuskbase DSN at %s: %w", addr, err)
+}
+
+func postgresQuoteIdentifier(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+func postgresQuoteLiteral(value string) string {
+	return `'` + strings.ReplaceAll(value, `'`, `''`) + `'`
 }
 
 type commandRunner interface {

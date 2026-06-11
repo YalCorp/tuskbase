@@ -212,6 +212,10 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	cfg.DBPath = *dbPath
 	cfg = normalizedDaemonConfig(cfg)
 	store, storeErr := loadRuntimeStoreConfig(cfg.DBPath)
+	storeCheck := storeRuntimeCheck{}
+	if storeErr == nil {
+		storeCheck = checkRuntimeStore(ctx, cfg, store)
+	}
 	incompleteLocalShared := cfg.Mode == modeLocalShared && strings.TrimSpace(store.PostgresDSN) == ""
 	authPolicy, authErr := loadAuthPolicy(cfg.Mode != modeDemo)
 	status := newLifecycleController().Status(ctx, cfg)
@@ -238,6 +242,22 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 			}
 			fmt.Fprintf(stdout, "docker_postgres_image: %s\n", docker.Image)
 			fmt.Fprintf(stdout, "docker_postgres_port: %d\n", docker.Port)
+		}
+		if storeCheck.Checked {
+			if storeCheck.Ready {
+				fmt.Fprintf(stdout, "store_runtime: ready\n")
+				fmt.Fprintf(stdout, "postgres_connect: ok\n")
+			} else {
+				fmt.Fprintf(stdout, "store_runtime: not-ready\n")
+				fmt.Fprintf(stdout, "postgres_connect: %s\n", storeCheck.Status)
+				fmt.Fprintf(stdout, "postgres_error: %s\n", storeCheck.Error)
+				if storeCheck.RepairHint != "" {
+					fmt.Fprintf(stdout, "repair_hint: %s\n", storeCheck.RepairHint)
+				}
+				if storeCheck.FallbackHint != "" {
+					fmt.Fprintf(stdout, "fallback_hint: %s\n", storeCheck.FallbackHint)
+				}
+			}
 		}
 	}
 	if storeErr != nil {
