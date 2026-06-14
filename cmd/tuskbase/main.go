@@ -280,11 +280,7 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	fmt.Fprintf(stdout, "service_state: %s\n", emptyDefault(status.State, "unknown"))
 	fmt.Fprintf(stdout, "service_autostart: %s\n", emptyDefault(status.Autostart, "unknown"))
 	fmt.Fprintf(stdout, "log_path: %s\n", status.LogPath)
-	if strings.EqualFold(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER"), "openai") && strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
-		fmt.Fprintf(stdout, "openai: missing OPENAI_API_KEY\n")
-	} else {
-		fmt.Fprintf(stdout, "openai: ok or disabled\n")
-	}
+	printEmbeddingDoctor(stdout)
 	fmt.Fprintf(stdout, "clients: codex, claude, cursor, generic (print with `tuskbase connect <client>`)\n")
 	return nil
 }
@@ -403,6 +399,36 @@ func storeFactoryForRuntime(cfg runtimeConfig, logger *slog.Logger) (daemon.Stor
 	}
 }
 
+func printEmbeddingDoctor(w io.Writer) {
+	provider := strings.ToLower(strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER")))
+	switch provider {
+	case "", "none", "text":
+		fmt.Fprintf(w, "embeddings: disabled\n")
+	case "openai":
+		if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
+			fmt.Fprintf(w, "embeddings: openai missing OPENAI_API_KEY\n")
+			return
+		}
+		model := strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_MODEL"))
+		if model == "" {
+			model = embeddings.DefaultOpenAIEmbeddingModel
+		}
+		fmt.Fprintf(w, "embeddings: openai model=%s\n", model)
+	case "ollama":
+		model := strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_MODEL"))
+		if model == "" {
+			model = embeddings.DefaultOllamaEmbeddingModel
+		}
+		baseURL := configuredOllamaBaseURL()
+		if strings.TrimSpace(baseURL) == "" {
+			baseURL = embeddings.DefaultOllamaBaseURL
+		}
+		fmt.Fprintf(w, "embeddings: ollama model=%s base_url=%s\n", model, baseURL)
+	default:
+		fmt.Fprintf(w, "embeddings: unknown provider %s\n", provider)
+	}
+}
+
 // loadEmbeddingProvider keeps embeddings optional; text lookup must stay usable without network access or a model provider.
 func loadEmbeddingProvider() (ports.EmbeddingProvider, error) {
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER")))
@@ -411,9 +437,18 @@ func loadEmbeddingProvider() (ports.EmbeddingProvider, error) {
 		return nil, nil
 	case "openai":
 		return embeddings.NewOpenAIProvider(os.Getenv("OPENAI_API_KEY"), os.Getenv("TUSKBASE_EMBEDDING_MODEL"), os.Getenv("TUSKBASE_OPENAI_BASE_URL"), nil)
+	case "ollama":
+		return embeddings.NewOllamaProvider(os.Getenv("TUSKBASE_EMBEDDING_MODEL"), configuredOllamaBaseURL(), nil)
 	default:
 		return nil, fmt.Errorf("unknown TUSKBASE_EMBEDDING_PROVIDER %q", provider)
 	}
+}
+
+func configuredOllamaBaseURL() string {
+	if value := strings.TrimSpace(os.Getenv("TUSKBASE_OLLAMA_BASE_URL")); value != "" {
+		return value
+	}
+	return strings.TrimSpace(os.Getenv("OLLAMA_HOST"))
 }
 
 func loadAuthPolicy(required bool) (daemon.AuthPolicy, error) {

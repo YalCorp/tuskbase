@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -225,6 +227,21 @@ CREATE TABLE IF NOT EXISTS search_index (
 
 CREATE INDEX IF NOT EXISTS idx_search_index_workspace_kind
 ON search_index(workspace_id, kind, entity_id);
+
+CREATE TABLE IF NOT EXISTS vector_index (
+    workspace_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    path TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL DEFAULT '',
+    embedding vector NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(workspace_id, kind, entity_id, path)
+);
+
+CREATE INDEX IF NOT EXISTS idx_vector_index_workspace_kind
+ON vector_index(workspace_id, kind, entity_id);
 `
 
 func (s *Store) UpsertWorkspace(ctx context.Context, w domain.Workspace) (domain.Workspace, error) {
@@ -529,6 +546,9 @@ func (s *Store) ReplaceWorkspaceDocuments(ctx context.Context, workspaceID strin
 	if _, err := tx.ExecContext(ctx, `DELETE FROM search_index WHERE workspace_id = $1 AND kind = 'document'`, workspaceID); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM vector_index WHERE workspace_id = $1 AND kind = 'document'`, workspaceID); err != nil {
+		return err
+	}
 	for _, doc := range docs {
 		_, err := tx.ExecContext(ctx, `
 INSERT INTO repo_documents(id, workspace_id, path, title, content, chunk_index, created_at, updated_at)
@@ -718,6 +738,70 @@ LIMIT $` + fmt.Sprint(len(args))
 	return results, nil
 }
 
+func (s *Store) UpsertVector(ctx context.Context, record ports.VectorRecord) error {
+	if strings.TrimSpace(record.WorkspaceID) == "" || len(record.Vector) == 0 {
+		return nil
+	}
+	vector, err := vectorLiteral(record.Vector)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO vector_index(workspace_id, kind, entity_id, title, path, body, embedding, updated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7::vector, $8)
+ON CONFLICT(workspace_id, kind, entity_id, path) DO UPDATE SET
+    title = excluded.title,
+    body = excluded.body,
+    embedding = excluded.embedding,
+    updated_at = excluded.updated_at
+`, record.WorkspaceID, record.Kind, record.EntityID, record.Title, record.Path, snippet(record.Text), vector, time.Now().UTC())
+	return err
+}
+
+func (s *Store) SearchVector(ctx context.Context, q ports.VectorQuery) ([]ports.SearchResult, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if len(q.Vector) == 0 || strings.TrimSpace(q.WorkspaceID) == "" {
+		return nil, nil
+	}
+	vector, err := vectorLiteral(q.Vector)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT kind, entity_id, workspace_id, title, path, body, 1 - (embedding <=> $2::vector) AS score
+FROM vector_index
+WHERE workspace_id = $1
+  AND vector_dims(embedding) = vector_dims($2::vector)
+  AND (
+      kind = 'document'
+      OR EXISTS (
+          SELECT 1 FROM decisions d
+          WHERE d.id = vector_index.entity_id
+            AND d.workspace_id = vector_index.workspace_id
+            AND d.valid_to IS NULL
+      )
+  )
+ORDER BY embedding <=> $2::vector
+LIMIT $3
+`, q.WorkspaceID, vector, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var results []ports.SearchResult
+	for rows.Next() {
+		var r ports.SearchResult
+		if err := rows.Scan(&r.Kind, &r.EntityID, &r.WorkspaceID, &r.Title, &r.Path, &r.Snippet, &r.Score); err != nil {
+			return nil, err
+		}
+		results = append(results, r)
+	}
+	return results, rows.Err()
+}
+
 const decisionSelectColumns = `
 id, workspace_id, actor_json, type, title, outcome, rationale, confidence, status,
 valid_from, valid_to, transaction_time, precedent_ref, supersedes_id, completeness_score, metadata_json,
@@ -838,6 +922,21 @@ func tokenScore(tokens []string, text string) float64 {
 		}
 	}
 	return score / float64(max(1, len(tokens)))
+}
+
+func vectorLiteral(vector []float32) (string, error) {
+	if len(vector) == 0 {
+		return "", errors.New("vector is required")
+	}
+	parts := make([]string, 0, len(vector))
+	for _, value := range vector {
+		f := float64(value)
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return "", errors.New("vector values must be finite")
+		}
+		parts = append(parts, strconv.FormatFloat(f, 'g', -1, 32))
+	}
+	return "[" + strings.Join(parts, ",") + "]", nil
 }
 
 func snippet(body string) string {

@@ -16,7 +16,7 @@ Implemented today:
 - HTTP MCP and optional REST require `Authorization: Bearer <key>` by default.
 - `tuskbase bridge` lets local MCP clients use Tuskbase-managed credentials over stdio instead of requiring per-shell token environment variables, and checks daemon readiness before completing MCP initialization.
 - `/healthz` remains unauthenticated and reports the active auth policy and auth source.
-- `tuskbase setup` generates and stores local keys, then attempts to install and start a user-scope daemon service for Local Basic and Local Shared after Local Shared Postgres is configured through Docker, an existing DSN, or Supabase; env vars such as `TUSKBASE_API_KEY`, `TUSKBASE_AGENT_KEYS`, and `TUSKBASE_POSTGRES_DSN` remain manual overrides.
+- `tuskbase setup` generates and stores local keys, then attempts to install and start a user-scope daemon service for Local Basic and Local Shared after Local Shared Postgres is configured through Docker or an existing DSN; env vars such as `TUSKBASE_API_KEY`, `TUSKBASE_AGENT_KEYS`, and `TUSKBASE_POSTGRES_DSN` remain manual overrides.
 - Authenticated writes derive actor attribution from the authenticated principal and reject mismatched actors.
 - Local key admin supports listing, rotating, and Local Shared named-key management.
 
@@ -69,7 +69,7 @@ That label describes the client-to-bridge stdio transport only. The bridge still
 
 ## Local Shared
 
-Local Shared is more serious because multiple tools write into one Postgres-backed decision memory. The default setup path can provision Docker-managed Postgres+pgvector; existing Postgres and Supabase paths use a configured DSN.
+Local Shared is more serious because multiple tools write into one Postgres-backed decision memory. The default setup path can provision Docker-managed Postgres+pgvector; existing Postgres uses a configured DSN. The Supabase path is paused as a current product focus.
 
 Security posture:
 

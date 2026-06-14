@@ -170,7 +170,7 @@ func normalizePostgresSource(value string) (string, error) {
 	case postgresSourceSupabase:
 		return postgresSourceSupabase, nil
 	default:
-		return "", fmt.Errorf("unknown postgres source %q; expected auto, docker, existing, or supabase", value)
+		return "", fmt.Errorf("unknown postgres source %q; expected auto, docker, or existing", value)
 	}
 }
 
