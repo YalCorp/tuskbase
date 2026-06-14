@@ -89,7 +89,7 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 	transport := fs.String("transport", transportBridge, "MCP client transport to print/apply: bridge or http")
 	postgresDSN := fs.String("postgres-dsn", "", "Postgres DSN for local-shared setup")
 	postgresDriver := fs.String("postgres-driver", "", "Postgres database/sql driver for local-shared setup")
-	postgresSource := fs.String("postgres-source", postgresSourceAuto, "Local Shared Postgres source: auto, docker, existing, or supabase")
+	postgresSource := fs.String("postgres-source", postgresSourceAuto, "Local Shared Postgres source: auto, docker, or existing")
 	dockerContextDefault := configuredDockerContext()
 	dockerPostgresPort := fs.Int("docker-postgres-port", configuredDockerPostgresPort(), "host port for Docker-managed Local Shared Postgres")
 	dockerPostgresImage := fs.String("docker-postgres-image", configuredDockerPostgresImage(), "Docker image for Docker-managed Local Shared pgvector Postgres")

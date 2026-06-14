@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/priyavratuniyal/tuskbase/internal/adapters/embeddings"
 	"github.com/priyavratuniyal/tuskbase/internal/daemon"
 )
 
@@ -378,6 +379,23 @@ func TestLoadRuntimeConfigRequiresPostgresDSNForStoredLocalShared(t *testing.T) 
 	_, err := loadRuntimeConfig("127.0.0.1:8765", "ignored.db", true, false)
 	if err == nil || !strings.Contains(err.Error(), "postgres dsn is required") {
 		t.Fatalf("loadRuntimeConfig() error = %v, want postgres dsn requirement", err)
+	}
+}
+
+func TestLoadEmbeddingProviderSupportsOllama(t *testing.T) {
+	t.Setenv("TUSKBASE_EMBEDDING_PROVIDER", "ollama")
+	t.Setenv("TUSKBASE_EMBEDDING_MODEL", "all-minilm")
+	t.Setenv("TUSKBASE_OLLAMA_BASE_URL", "127.0.0.1:11434")
+	emb, err := loadEmbeddingProvider()
+	if err != nil {
+		t.Fatalf("loadEmbeddingProvider() error = %v", err)
+	}
+	provider, ok := emb.(*embeddings.OllamaProvider)
+	if !ok {
+		t.Fatalf("embedding provider = %T, want OllamaProvider", emb)
+	}
+	if provider.Model != "all-minilm" || provider.BaseURL != "http://127.0.0.1:11434" {
+		t.Fatalf("ollama provider = %+v", provider)
 	}
 }
 

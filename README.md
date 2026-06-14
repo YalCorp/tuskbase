@@ -39,8 +39,8 @@ Implemented now:
 - MCP tools for `attach`, `lookup`, `preflight`, `remember`, recent decisions, and active conflicts.
 - Demo stdio MCP mode for quick local experiments.
 - Local Basic daemon mode with SQLite, loopback HTTP MCP, and stdio bridge auth.
-- Local Shared mode with Postgres selected from Docker-managed pgvector Postgres, existing Postgres, or Supabase.
-- Deterministic active-memory lookup, preflight conflict detection, lookup receipts, and optional OpenAI embeddings.
+- Local Shared mode with Postgres selected from Docker-managed pgvector Postgres or an existing pgvector-enabled Postgres DSN.
+- Semantic active-memory lookup with pgvector when embeddings are configured, deterministic text fallback, preflight conflict detection, lookup receipts, and optional OpenAI or Ollama embeddings.
 - Local bearer auth for HTTP MCP/REST, auth-derived actor attribution, and named Local Shared agent keys.
 - `tuskbase doctor` and bridge diagnostics for common local setup failures.
 - Optional REST API for local development/debugging.
@@ -49,7 +49,6 @@ Deferred:
 
 - UI.
 - SDKs.
-- Semantic pgvector retrieval.
 - Hosted sync.
 - Package-manager wrappers and release-channel polish.
 
@@ -103,7 +102,7 @@ tuskbase status
 |---|---|---|---|
 | Demo | SQLite | Trying MCP tools with the least ceremony | None |
 | Local Basic | SQLite | One developer using local agents on one machine | Local daemon |
-| Local Shared | Postgres + pgvector extension | Heavier local multi-agent use or shared local memory | Docker, existing Postgres, or Supabase |
+| Local Shared | Postgres + pgvector extension | Heavier local multi-agent use or shared local memory | Docker or existing Postgres |
 
 Local Basic is the default:
 
@@ -121,10 +120,18 @@ Local Shared with your own database:
 
 ```bash
 tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn postgres://tuskbase:secret@localhost:5432/tuskbase?sslmode=disable
-tuskbase setup --mode local-shared --postgres-source supabase --postgres-dsn postgres://...
 ```
 
-All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it. Existing Postgres and Supabase setups must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is still deferred.
+All Local Shared Postgres paths require the `vector` extension. The Docker path provisions it. Existing Postgres must allow `CREATE EXTENSION IF NOT EXISTS vector` or have pgvector enabled already. Semantic pgvector retrieval is active when `TUSKBASE_EMBEDDING_PROVIDER` is `ollama` or `openai`; without embeddings, Tuskbase falls back to deterministic text search.
+
+Local semantic retrieval with Ollama:
+
+```bash
+ollama pull nomic-embed-text
+export TUSKBASE_EMBEDDING_PROVIDER=ollama
+export TUSKBASE_EMBEDDING_MODEL=nomic-embed-text
+tuskbase daemon restart
+```
 
 For the full setup matrix, Docker context notes, and inspectable templates, see [Product Tiers](docs/03_product_tiers.md#current-setup-paths) and [Local Shared Troubleshooting](docs/03_product_tiers.md#local-shared-troubleshooting).
 

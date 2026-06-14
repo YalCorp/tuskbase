@@ -24,14 +24,14 @@ These defaults are meant to make the first implementation practical while preser
 | HTTP surface | Go HTTP adapter at the edge, sharing the same application core as MCP. |
 | Agent integration | Local MCP server as a first-class surface, with stdio bridge setup for local authenticated daemon use. |
 | Durable storage | SQLite as the zero-config local default; Postgres available as a shared store adapter, with Docker-managed pgvector Postgres provisioning for Local Shared setup. |
-| Semantic retrieval | Text search first; pgvector is required for Local Shared Postgres readiness, while semantic vector retrieval remains behind future `VectorIndex` work. |
+| Semantic retrieval | Text fallback by default; pgvector semantic search is active for Local Shared when embeddings are configured. |
 | Embeddings | Local, OpenAI-compatible, and deterministic test providers behind one provider interface. |
 | Tests | Offline-friendly Go tests with fake providers by default. |
 | Distribution | Native binary first; Docker Compose is used for Local Shared infrastructure, while npm/Homebrew-style wrappers can come later as packaging conveniences. |
 
 These choices should live at the edge of the system. Domain and application code should depend on interfaces rather than concrete libraries or services.
 
-The Postgres adapter is implemented as a `database/sql` adapter. The standard binary registers pgx stdlib. Local Shared can select Postgres from a Docker-managed pgvector container, an existing Postgres DSN, or a Supabase DSN; SQLite remains the Demo and Local Basic default.
+The Postgres adapter is implemented as a `database/sql` adapter. The standard binary registers pgx stdlib. Local Shared can select Postgres from a Docker-managed pgvector container or an existing pgvector-enabled Postgres DSN; SQLite remains the Demo and Local Basic default. The older Supabase path is paused as a product focus.
 
 ## Product Tiers And Storage Direction
 
@@ -41,10 +41,10 @@ Tuskbase should grow through four product tiers. The same application core and d
 |---|---|---|---|---|
 | Demo | Prove Tuskbase works with the least setup | stdio MCP | SQLite | text search |
 | Local Basic | One developer using one or more local agents on one machine | stdio bridge to loopback HTTP MCP daemon | SQLite | text search, optional OpenAI embeddings |
-| Local Shared | Heavy local multi-agent usage or small shared setup | stdio bridge to loopback HTTP MCP daemon | Postgres with pgvector required | text search now; semantic pgvector retrieval with OpenAI, Ollama, or future embedded embeddings later |
+| Local Shared | Heavy local multi-agent usage or small shared setup | stdio bridge to loopback HTTP MCP daemon | Postgres with pgvector required | semantic pgvector retrieval with Ollama or OpenAI embeddings, text fallback |
 | Hosted | Future managed team product | managed HTTP MCP | managed Postgres | managed vector retrieval, Qdrant optional at scale |
 
-SQLite is the Demo and Local Basic default, not the ceiling for serious multi-agent workflows. Local Shared now has the foundation to use Postgres as the durable decision store through Docker-managed pgvector Postgres, an existing Postgres DSN, or a Supabase DSN. Semantic pgvector retrieval, Supabase-specific validation polish, and alternate local embedding providers can build on that foundation without becoming core assumptions.
+SQLite is the Demo and Local Basic default, not the ceiling for serious multi-agent workflows. Local Shared uses Postgres as the durable decision store through Docker-managed pgvector Postgres or an existing Postgres DSN. Semantic pgvector retrieval now builds on that foundation when Ollama or OpenAI embeddings are configured.
 
 Vector search is a derived retrieval layer. Canonical decisions live in SQLite or Postgres first. pgvector is the default serious vector path because it keeps vectors with Postgres data. Qdrant or another vector database should remain an optional scale adapter, not a first-use requirement.
 
@@ -52,7 +52,7 @@ Embeddings should be provider-based:
 
 - no embeddings required for Demo,
 - optional OpenAI embeddings for Local Basic,
-- OpenAI, Ollama, and eventually an embedded local model for Local Shared,
+- Ollama or OpenAI embeddings for Local Shared, and eventually an embedded local model,
 - managed provider choices for Hosted later.
 
 Temporal graph behavior should be modeled in the durable store first with decision relationships, conflicts, `valid_from`, `valid_to`, `transaction_time`, and status fields. A dedicated temporal graph database is deferred until real query needs prove the relational model insufficient.
@@ -93,7 +93,6 @@ Likely later additions:
 
 - audit UI after API and MCP flows are useful,
 - SDKs after contracts are stable,
-- pgvector schema and retrieval for Postgres-backed Local Shared,
 - alternate vector indexes behind the vector interface,
 - hooks for coding-agent workflows,
 - optional support CLI if local operations need it.

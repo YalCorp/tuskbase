@@ -3,12 +3,30 @@ package postgres
 import (
 	"context"
 	"fmt"
+	"math"
 	"os"
 	"testing"
 
 	"github.com/priyavratuniyal/tuskbase/internal/app"
 	"github.com/priyavratuniyal/tuskbase/internal/domain"
+	"github.com/priyavratuniyal/tuskbase/internal/ports"
 )
+
+func TestVectorLiteral(t *testing.T) {
+	got, err := vectorLiteral([]float32{0.1, -2, 3.25})
+	if err != nil {
+		t.Fatalf("vectorLiteral() error = %v", err)
+	}
+	if got != "[0.1,-2,3.25]" {
+		t.Fatalf("vectorLiteral() = %q", got)
+	}
+}
+
+func TestVectorLiteralRejectsNonFinite(t *testing.T) {
+	if _, err := vectorLiteral([]float32{float32(math.Inf(1))}); err == nil {
+		t.Fatal("vectorLiteral() error = nil, want non-finite rejection")
+	}
+}
 
 func TestPostgresDecisionLifecycleContract(t *testing.T) {
 	dsn := os.Getenv("TUSKBASE_POSTGRES_DSN")
@@ -77,5 +95,15 @@ func TestPostgresDecisionLifecycleContract(t *testing.T) {
 	}
 	if len(recent) != 1 || recent[0].ID != second.Decision.ID {
 		t.Fatalf("Recent() = %#v, want only superseding decision", recent)
+	}
+	if err := store.UpsertVector(ctx, ports.VectorRecord{WorkspaceID: workspace.ID, Kind: "decision", EntityID: second.Decision.ID, Title: second.Decision.Title, Text: second.Decision.Rationale, Vector: []float32{0.9, 0.1, 0.1}}); err != nil {
+		t.Fatalf("UpsertVector() error = %v", err)
+	}
+	results, err := store.SearchVector(ctx, ports.VectorQuery{WorkspaceID: workspace.ID, Vector: []float32{0.8, 0.1, 0.1}, Limit: 5})
+	if err != nil {
+		t.Fatalf("SearchVector() error = %v", err)
+	}
+	if len(results) == 0 || results[0].EntityID != second.Decision.ID || results[0].Score <= 0 {
+		t.Fatalf("SearchVector() = %#v, want semantic match for second decision", results)
 	}
 }
