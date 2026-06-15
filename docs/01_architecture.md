@@ -42,7 +42,7 @@ The domain layer should not know where data is stored, how embeddings are genera
 
 ### Application Use Cases
 
-Application use cases own workflows such as attaching a workspace, looking up memory, preflighting a proposal, remembering a decision, listing recent decisions, and listing conflicts.
+Application use cases own workflows such as attaching a workspace, looking up memory, preflighting a proposal, remembering a decision, listing recent decisions, listing conflicts, appending assessments, querying structured decision trails, resolving or reconciling conflicts, producing trail stats, and producing compact workspace context.
 
 Use cases should orchestrate interfaces. They should not call raw SQL, framework handlers, provider SDKs, queue clients, UI code, or MCP code directly.
 
@@ -103,7 +103,7 @@ Phase 1 should not include cloud auth, enterprise governance, RBAC, or multi-ten
 ## Architecture Guardrails
 
 - Keep domain and application logic independent from frameworks and concrete infrastructure.
-- Keep API and MCP behavior backed by the same use cases.
+- Keep API and MCP behavior backed by the same use cases; compact workspace context, conflict lifecycle, assessment feedback, reconciliation, and stats should stay in application services rather than MCP-only logic.
 - Treat storage, vector search, embeddings, UI, SDKs, queues, hooks, and optional CLI as adapters.
 - Prefer clear interfaces over hard-coded technology choices.
 - Avoid dashboard-first, SDK-first, cloud-first, or enterprise-first architecture in Phase 1.

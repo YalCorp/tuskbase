@@ -13,37 +13,56 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/priyavratuniyal/tuskbase/internal/domain"
 	"github.com/priyavratuniyal/tuskbase/internal/ports"
 )
 
-const defaultLimit = 10
+const (
+	defaultLimit             = 10
+	defaultContextLimit      = 6
+	contextDocumentScanLimit = 1000
+)
 
 type Store interface {
 	ports.WorkspaceStore
 	ports.DecisionStore
 	ports.DocumentStore
 	ports.ReceiptStore
+	ports.AssessmentStore
 	ports.ConflictStore
 }
 
 type Service struct {
-	store  Store
-	search ports.SearchIndex
-	ids    ports.IDGenerator
-	clock  ports.Clock
+	store     Store
+	search    ports.SearchIndex
+	ids       ports.IDGenerator
+	clock     ports.Clock
+	validator ports.RelationshipValidator
 }
 
-func NewService(store Store, search ports.SearchIndex, ids ports.IDGenerator, clock ports.Clock) *Service {
+type Option func(*Service)
+
+func WithRelationshipValidator(validator ports.RelationshipValidator) Option {
+	return func(s *Service) {
+		s.validator = validator
+	}
+}
+
+func NewService(store Store, search ports.SearchIndex, ids ports.IDGenerator, clock ports.Clock, opts ...Option) *Service {
 	if ids == nil {
 		ids = UUIDGenerator{}
 	}
 	if clock == nil {
 		clock = SystemClock{}
 	}
-	return &Service{store: store, search: search, ids: ids, clock: clock}
+	service := &Service{store: store, search: search, ids: ids, clock: clock}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(service)
+		}
+	}
+	return service
 }
 
 type AttachInput struct {
@@ -227,7 +246,7 @@ func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutpu
 			Summary:           relationshipReason(rel, decision),
 			Severity:          severityForConfidence(rel.Confidence),
 			Confidence:        rel.Confidence,
-			Status:            "open",
+			Status:            domain.ConflictOpen,
 			CreatedAt:         now,
 		}
 		if err := conflict.Validate(); err != nil {
@@ -303,10 +322,12 @@ type PreflightOutput struct {
 }
 
 type DecisionProposalRelation struct {
-	DecisionID string                  `json:"decision_id"`
-	Type       domain.RelationshipType `json:"type"`
-	Confidence float64                 `json:"confidence"`
-	Reason     string                  `json:"reason,omitempty"`
+	DecisionID string                     `json:"decision_id"`
+	Type       domain.RelationshipType    `json:"type"`
+	Confidence float64                    `json:"confidence"`
+	Reason     string                     `json:"reason,omitempty"`
+	Subject    string                     `json:"subject,omitempty"`
+	Evidence   []ports.RelationshipSignal `json:"evidence,omitempty"`
 }
 
 func (s *Service) Preflight(ctx context.Context, in PreflightInput) (PreflightOutput, error) {
@@ -323,23 +344,12 @@ func (s *Service) Preflight(ctx context.Context, in PreflightInput) (PreflightOu
 	}
 	var out PreflightOutput
 	out.Lookup = lookup
-	seen := map[string]struct{}{}
-	for _, result := range lookup.Results {
-		if !isDecisionBoundResult(result.Kind) {
-			continue
-		}
-		if _, ok := seen[result.EntityID]; ok {
-			continue
-		}
-		seen[result.EntityID] = struct{}{}
-		decision, err := s.store.GetDecision(ctx, result.EntityID)
-		if err != nil {
-			return PreflightOutput{}, err
-		}
-		if !decision.IsActive() {
-			continue
-		}
-		relation := classifyProposal(in.Proposal, decision)
+	decisions, err := s.decisionsForResults(ctx, workspaceID, lookup.Results, in.Limit)
+	if err != nil {
+		return PreflightOutput{}, err
+	}
+	for _, decision := range decisions {
+		relation := s.classifyProposal(ctx, workspaceID, in.Proposal, decision)
 		out.Relationships = append(out.Relationships, relation)
 		if relation.Type == domain.RelationshipConflicts {
 			conflict := domain.Conflict{
@@ -350,7 +360,7 @@ func (s *Service) Preflight(ctx context.Context, in PreflightInput) (PreflightOu
 				Summary:           relation.Reason,
 				Severity:          severityForConfidence(relation.Confidence),
 				Confidence:        relation.Confidence,
-				Status:            "open",
+				Status:            domain.ConflictOpen,
 				CreatedAt:         s.clock.Now(),
 			}
 			if err := conflict.Validate(); err != nil {
@@ -391,6 +401,303 @@ func (s *Service) Conflicts(ctx context.Context, workspaceID string) ([]domain.C
 		return nil, errors.New("workspace_id is required")
 	}
 	return s.store.ListOpenConflicts(ctx, workspaceID)
+}
+
+type ContextInput struct {
+	WorkspaceID string `json:"workspace_id"`
+	Limit       int    `json:"limit,omitempty"`
+}
+
+type ContextOutput struct {
+	Workspace              ContextWorkspace      `json:"workspace"`
+	ActiveDecisions        []ContextDecision     `json:"active_decisions"`
+	OpenConflicts          []ContextConflict     `json:"open_conflicts"`
+	RecentSupersessions    []ContextSupersession `json:"recent_supersessions,omitempty"`
+	DegradedStates         []ContextDegraded     `json:"degraded_states,omitempty"`
+	RecommendedNextActions []string              `json:"recommended_next_actions"`
+	GeneratedAt            time.Time             `json:"generated_at"`
+}
+
+type ContextWorkspace struct {
+	ID               string            `json:"id"`
+	RepoRoot         string            `json:"repo_root"`
+	DisplayName      string            `json:"display_name"`
+	RepoFingerprint  string            `json:"repo_fingerprint"`
+	DetectedDocCount int               `json:"detected_doc_count"`
+	RepoDocuments    []ContextDocument `json:"repo_documents,omitempty"`
+	UpdatedAt        time.Time         `json:"updated_at"`
+}
+
+type ContextDocument struct {
+	Path   string `json:"path"`
+	Title  string `json:"title,omitempty"`
+	Chunks int    `json:"chunks"`
+}
+
+type ContextDecision struct {
+	ID                string    `json:"id"`
+	Type              string    `json:"type"`
+	Title             string    `json:"title"`
+	Outcome           string    `json:"outcome"`
+	Confidence        float64   `json:"confidence"`
+	CompletenessScore float64   `json:"completeness_score"`
+	ClaimCount        int       `json:"claim_count"`
+	EvidenceCount     int       `json:"evidence_count"`
+	SupersedesID      string    `json:"supersedes_id,omitempty"`
+	ValidFrom         time.Time `json:"valid_from"`
+}
+
+type ContextConflict struct {
+	ID                string                  `json:"id"`
+	DecisionID        string                  `json:"decision_id,omitempty"`
+	Proposal          string                  `json:"proposal,omitempty"`
+	ConflictingWithID string                  `json:"conflicting_with_id"`
+	Summary           string                  `json:"summary"`
+	Severity          domain.ConflictSeverity `json:"severity"`
+	Confidence        float64                 `json:"confidence"`
+	CreatedAt         time.Time               `json:"created_at"`
+}
+
+type ContextSupersession struct {
+	DecisionID      string    `json:"decision_id"`
+	Title           string    `json:"title"`
+	SupersededID    string    `json:"superseded_id"`
+	SupersededTitle string    `json:"superseded_title,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
+	TransactionTime time.Time `json:"transaction_time"`
+}
+
+type ContextDegraded struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Detail   string `json:"detail"`
+}
+
+func (s *Service) Context(ctx context.Context, in ContextInput) (ContextOutput, error) {
+	if err := RequireRead(ctx); err != nil {
+		return ContextOutput{}, err
+	}
+	workspaceID := strings.TrimSpace(in.WorkspaceID)
+	if workspaceID == "" {
+		return ContextOutput{}, errors.New("workspace_id is required")
+	}
+	limit := contextLimit(in.Limit)
+	workspace, err := s.store.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return ContextOutput{}, err
+	}
+	docs, err := s.store.ListWorkspaceDocuments(ctx, workspaceID, contextDocumentScanLimit)
+	if err != nil {
+		return ContextOutput{}, err
+	}
+	decisions, err := s.store.RecentDecisions(ctx, workspaceID, limit)
+	if err != nil {
+		return ContextOutput{}, err
+	}
+	conflicts, err := s.store.ListOpenConflicts(ctx, workspaceID)
+	if err != nil {
+		return ContextOutput{}, err
+	}
+	out := ContextOutput{
+		Workspace:           contextWorkspace(workspace, docs, limit),
+		ActiveDecisions:     contextDecisions(decisions),
+		OpenConflicts:       contextConflicts(conflicts),
+		RecentSupersessions: s.contextSupersessions(ctx, decisions, limit),
+		GeneratedAt:         s.clock.Now(),
+	}
+	out.DegradedStates = contextDegradedStates(out)
+	out.RecommendedNextActions = contextRecommendedNextActions(out)
+	return out, nil
+}
+
+func contextLimit(limit int) int {
+	if limit <= 0 {
+		return defaultContextLimit
+	}
+	if limit > defaultLimit {
+		return defaultLimit
+	}
+	return limit
+}
+
+func contextWorkspace(workspace domain.Workspace, docs []domain.RepoDocument, limit int) ContextWorkspace {
+	return ContextWorkspace{
+		ID:               workspace.ID,
+		RepoRoot:         workspace.RepoRoot,
+		DisplayName:      workspace.DisplayName,
+		RepoFingerprint:  workspace.RepoFingerprint,
+		DetectedDocCount: uniqueDocumentCount(docs),
+		RepoDocuments:    summarizeDocuments(docs, limit),
+		UpdatedAt:        workspace.UpdatedAt,
+	}
+}
+
+func contextDecisions(decisions []domain.Decision) []ContextDecision {
+	out := make([]ContextDecision, 0, len(decisions))
+	for _, decision := range decisions {
+		out = append(out, ContextDecision{
+			ID:                decision.ID,
+			Type:              decision.Type,
+			Title:             decision.Title,
+			Outcome:           decision.Outcome,
+			Confidence:        decision.Confidence,
+			CompletenessScore: decision.CompletenessScore,
+			ClaimCount:        len(decision.Claims),
+			EvidenceCount:     len(decision.Evidence),
+			SupersedesID:      decision.SupersedesID,
+			ValidFrom:         decision.ValidFrom,
+		})
+	}
+	return out
+}
+
+func contextConflicts(conflicts []domain.Conflict) []ContextConflict {
+	out := make([]ContextConflict, 0, len(conflicts))
+	for _, conflict := range conflicts {
+		out = append(out, ContextConflict{
+			ID:                conflict.ID,
+			DecisionID:        conflict.DecisionID,
+			Proposal:          conflict.Proposal,
+			ConflictingWithID: conflict.ConflictingWithID,
+			Summary:           conflict.Summary,
+			Severity:          conflict.Severity,
+			Confidence:        conflict.Confidence,
+			CreatedAt:         conflict.CreatedAt,
+		})
+	}
+	return out
+}
+
+func summarizeDocuments(docs []domain.RepoDocument, limit int) []ContextDocument {
+	if limit <= 0 {
+		limit = defaultContextLimit
+	}
+	titles := map[string]string{}
+	chunks := map[string]int{}
+	paths := make([]string, 0, len(docs))
+	for _, doc := range docs {
+		path := strings.TrimSpace(doc.Path)
+		if path == "" {
+			continue
+		}
+		if _, ok := chunks[path]; !ok {
+			paths = append(paths, path)
+			titles[path] = strings.TrimSpace(doc.Title)
+		}
+		chunks[path]++
+	}
+	sort.Strings(paths)
+	if len(paths) > limit {
+		paths = paths[:limit]
+	}
+	out := make([]ContextDocument, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, ContextDocument{Path: path, Title: titles[path], Chunks: chunks[path]})
+	}
+	return out
+}
+
+func uniqueDocumentCount(docs []domain.RepoDocument) int {
+	seen := map[string]struct{}{}
+	for _, doc := range docs {
+		path := strings.TrimSpace(doc.Path)
+		if path != "" {
+			seen[path] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+func (s *Service) contextSupersessions(ctx context.Context, decisions []domain.Decision, limit int) []ContextSupersession {
+	out := make([]ContextSupersession, 0, len(decisions))
+	seen := map[string]struct{}{}
+	add := func(decision domain.Decision, supersededID, reason string) {
+		if len(out) >= limit {
+			return
+		}
+		supersededID = strings.TrimSpace(supersededID)
+		if supersededID == "" {
+			return
+		}
+		key := decision.ID + "\x00" + supersededID
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		supersession := ContextSupersession{
+			DecisionID:      decision.ID,
+			Title:           decision.Title,
+			SupersededID:    supersededID,
+			Reason:          strings.TrimSpace(reason),
+			TransactionTime: decision.TransactionTime,
+		}
+		if superseded, err := s.store.GetDecision(ctx, supersededID); err == nil {
+			supersession.SupersededTitle = superseded.Title
+		}
+		out = append(out, supersession)
+	}
+	for _, decision := range decisions {
+		add(decision, decision.SupersedesID, "Supersedes prior active decision.")
+		for _, rel := range decision.Relationships {
+			if rel.Type == domain.RelationshipSupersedes {
+				add(decision, rel.ToDecisionID, rel.Reason)
+			}
+		}
+	}
+	return out
+}
+
+func contextDegradedStates(out ContextOutput) []ContextDegraded {
+	var states []ContextDegraded
+	if out.Workspace.DetectedDocCount == 0 {
+		states = append(states, ContextDegraded{Code: "repo_docs_missing", Severity: "warning", Detail: "No repo documents are attached for this workspace."})
+	}
+	if len(out.ActiveDecisions) == 0 {
+		states = append(states, ContextDegraded{Code: "no_active_decisions", Severity: "info", Detail: "No active decisions are recorded for this workspace."})
+	}
+	if len(out.OpenConflicts) > 0 {
+		states = append(states, ContextDegraded{Code: "open_conflicts", Severity: "warning", Detail: fmt.Sprintf("%d open conflict(s) need review before relying on affected decisions.", len(out.OpenConflicts))})
+	}
+	var thin int
+	for _, decision := range out.ActiveDecisions {
+		if decision.CompletenessScore > 0 && decision.CompletenessScore < 0.55 {
+			thin++
+		}
+	}
+	if thin > 0 {
+		states = append(states, ContextDegraded{Code: "low_completeness", Severity: "info", Detail: fmt.Sprintf("%d active decision(s) have low completeness.", thin)})
+	}
+	return states
+}
+
+func contextRecommendedNextActions(out ContextOutput) []string {
+	actions := make([]string, 0, 4)
+	if out.Workspace.DetectedDocCount == 0 {
+		actions = append(actions, "Run tuskbase_attach for this repo before relying on repo document context.")
+	}
+	if len(out.OpenConflicts) > 0 {
+		actions = append(actions, "Review open conflicts before relying on affected decisions.")
+	}
+	if len(out.ActiveDecisions) == 0 {
+		actions = append(actions, "Use tuskbase_remember after the work to record durable decisions worth preserving.")
+	} else {
+		actions = append(actions, "Use tuskbase_lookup with the task-specific question before editing, then cite the lookup receipt when reporting what context you used.")
+	}
+	if hasLowCompleteness(out.ActiveDecisions) {
+		actions = append(actions, "Enrich low-completeness active decisions with rationale, evidence, alternatives, claims, or supersedes links before treating them as strong precedent.")
+	}
+	actions = append(actions, "Use tuskbase_preflight before meaningful plans and report whether the plan follows, extends, duplicates, supersedes, or conflicts.")
+	actions = append(actions, "Use tuskbase_remember only for completed decisions with rationale, evidence, alternatives, claims, and supersedes links.")
+	return actions
+}
+
+func hasLowCompleteness(decisions []ContextDecision) bool {
+	for _, decision := range decisions {
+		if decision.CompletenessScore > 0 && decision.CompletenessScore < 0.55 {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeRememberRelationships(decision domain.Decision, input []domain.DecisionRelationship, ids ports.IDGenerator) []domain.DecisionRelationship {
@@ -662,109 +969,12 @@ func chunkText(text string, max int) []string {
 
 var wordRE = regexp.MustCompile(`[a-z0-9][a-z0-9_+\-./]*`)
 
-func classifyProposal(proposal string, decision domain.Decision) DecisionProposalRelation {
-	proposalText := strings.ToLower(proposal)
-	decisionText := strings.ToLower(strings.Join([]string{decision.Title, decision.Outcome, decision.Rationale, claimsText(decision.Claims)}, " "))
-	shared := sharedImportantTokens(proposalText, decisionText)
-	proposalPolarity := polarityByToken(proposalText)
-	decisionPolarity := polarityByToken(decisionText)
-	for token := range shared {
-		pp, pok := proposalPolarity[token]
-		dp, dok := decisionPolarity[token]
-		if pok && dok && pp != dp {
-			return DecisionProposalRelation{
-				DecisionID: decision.ID,
-				Type:       domain.RelationshipConflicts,
-				Confidence: 0.9,
-				Reason:     fmt.Sprintf("Proposal direction for %q conflicts with active decision %q.", token, decision.Title),
-			}
-		}
-	}
-	overlap := float64(len(shared)) / float64(max(1, len(importantTokens(proposalText))))
-	switch {
-	case overlap >= 0.7:
-		return DecisionProposalRelation{DecisionID: decision.ID, Type: domain.RelationshipDuplicates, Confidence: clamp(overlap), Reason: "Proposal substantially overlaps an active decision."}
-	case overlap >= 0.35:
-		return DecisionProposalRelation{DecisionID: decision.ID, Type: domain.RelationshipExtends, Confidence: clamp(overlap), Reason: "Proposal shares key terms with an active decision."}
-	default:
-		return DecisionProposalRelation{DecisionID: decision.ID, Type: domain.RelationshipFollows, Confidence: 0.35, Reason: "No deterministic contradiction found."}
-	}
-}
-
 func claimsText(claims []domain.Claim) string {
 	parts := make([]string, 0, len(claims))
 	for _, claim := range claims {
 		parts = append(parts, claim.Text)
 	}
 	return strings.Join(parts, " ")
-}
-
-func sharedImportantTokens(a, b string) map[string]struct{} {
-	ta := importantTokens(a)
-	tb := importantTokens(b)
-	out := map[string]struct{}{}
-	for token := range ta {
-		if _, ok := tb[token]; ok {
-			out[token] = struct{}{}
-		}
-	}
-	return out
-}
-
-func importantTokens(text string) map[string]struct{} {
-	out := map[string]struct{}{}
-	for _, token := range wordRE.FindAllString(strings.ToLower(text), -1) {
-		token = strings.TrimFunc(token, func(r rune) bool {
-			return !unicode.IsLetter(r) && !unicode.IsDigit(r)
-		})
-		if len(token) < 4 || stopWords[token] {
-			continue
-		}
-		out[token] = struct{}{}
-	}
-	return out
-}
-
-var stopWords = map[string]bool{
-	"about": true, "active": true, "after": true, "before": true, "decision": true,
-	"first": true, "from": true, "have": true, "into": true, "local": true,
-	"must": true, "need": true, "password": true, "reset": true, "should": true,
-	"storage": true, "store": true, "that": true, "their": true, "this": true,
-	"token": true, "tokens": true, "with": true, "without": false,
-}
-
-func polarityByToken(text string) map[string]int {
-	tokens := wordRE.FindAllString(strings.ToLower(text), -1)
-	out := map[string]int{}
-	for i, token := range tokens {
-		if len(token) < 4 || stopWords[token] {
-			continue
-		}
-		start := max(0, i-4)
-		window := strings.Join(tokens[start:i+1], " ")
-		neg := strings.Contains(window, "avoid") ||
-			strings.Contains(window, "do not") ||
-			strings.Contains(window, "don't") ||
-			strings.Contains(window, "never") ||
-			strings.Contains(window, "without") ||
-			strings.Contains(window, "remove") ||
-			strings.Contains(window, "replace") ||
-			strings.Contains(window, "reject")
-		if neg {
-			out[token] = -1
-			continue
-		}
-		pos := strings.Contains(window, "use") ||
-			strings.Contains(window, "adopt") ||
-			strings.Contains(window, "keep") ||
-			strings.Contains(window, "store") ||
-			strings.Contains(window, "require") ||
-			strings.Contains(window, "choose")
-		if pos {
-			out[token] = 1
-		}
-	}
-	return out
 }
 
 func severityForConfidence(confidence float64) domain.ConflictSeverity {

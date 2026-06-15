@@ -63,6 +63,97 @@ func TestHandlers(t *testing.T) {
 		t.Fatalf("lookup status = %d body = %s", lookupResp.Code, lookupResp.Body.String())
 	}
 
+	contextReq := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+attached.Workspace.ID+"/context", nil)
+	contextResp := httptest.NewRecorder()
+	handler.ServeHTTP(contextResp, contextReq)
+	if contextResp.Code != http.StatusOK {
+		t.Fatalf("context status = %d body = %s", contextResp.Code, contextResp.Body.String())
+	}
+
+	checkResp := doJSON(t, handler, http.MethodPost, "/v1/check", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"proposal":     "Avoid SQLite for local decisions.",
+	})
+	if checkResp.Code != http.StatusOK {
+		t.Fatalf("check status = %d body = %s", checkResp.Code, checkResp.Body.String())
+	}
+
+	queryResp := doJSON(t, handler, http.MethodPost, "/v1/decisions/query", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"text":         "SQLite",
+		"status":       "active",
+	})
+	if queryResp.Code != http.StatusOK {
+		t.Fatalf("query status = %d body = %s", queryResp.Code, queryResp.Body.String())
+	}
+
+	assessResp := doJSON(t, handler, http.MethodPost, "/v1/assessments", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"decision_id":  remembered.Decision.ID,
+		"actor":        map[string]any{"kind": "agent", "name": "codex"},
+		"signal":       "helpful",
+		"score":        5,
+	})
+	if assessResp.Code != http.StatusCreated {
+		t.Fatalf("assess status = %d body = %s", assessResp.Code, assessResp.Body.String())
+	}
+
+	preflightResp := doJSON(t, handler, http.MethodPost, "/v1/preflight", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"proposal":     "Avoid SQLite for local decisions.",
+	})
+	if preflightResp.Code != http.StatusOK {
+		t.Fatalf("preflight status = %d body = %s", preflightResp.Code, preflightResp.Body.String())
+	}
+	var preflight app.PreflightOutput
+	decodeResponse(t, preflightResp, &preflight)
+	if len(preflight.Conflicts) == 0 {
+		t.Fatal("preflight returned no conflict")
+	}
+
+	resolveResp := doJSON(t, handler, http.MethodPost, "/v1/conflicts/resolve", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"conflict_id":  preflight.Conflicts[0].ID,
+		"actor":        map[string]any{"kind": "agent", "name": "codex"},
+		"action":       "dismissed",
+		"summary":      "HTTP handler smoke test resolution.",
+	})
+	if resolveResp.Code != http.StatusOK {
+		t.Fatalf("resolve status = %d body = %s", resolveResp.Code, resolveResp.Body.String())
+	}
+
+	reconcileSeedResp := doJSON(t, handler, http.MethodPost, "/v1/preflight", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"proposal":     "Avoid SQLite for local decisions and use Postgres instead.",
+	})
+	if reconcileSeedResp.Code != http.StatusOK {
+		t.Fatalf("reconcile seed status = %d body = %s", reconcileSeedResp.Code, reconcileSeedResp.Body.String())
+	}
+	var reconcileSeed app.PreflightOutput
+	decodeResponse(t, reconcileSeedResp, &reconcileSeed)
+	if len(reconcileSeed.Conflicts) == 0 {
+		t.Fatal("reconcile seed returned no conflict")
+	}
+	reconcileResp := doJSON(t, handler, http.MethodPost, "/v1/reconcile", map[string]any{
+		"workspace_id": attached.Workspace.ID,
+		"conflict_ids": []any{reconcileSeed.Conflicts[0].ID},
+		"actor":        map[string]any{"kind": "agent", "name": "codex"},
+		"title":        "Use Postgres for local decisions",
+		"outcome":      "Use Postgres for local decisions when reconciliation requires retiring the SQLite direction.",
+		"rationale":    "HTTP handler smoke test reconciliation records a durable decision.",
+		"confidence":   0.8,
+	})
+	if reconcileResp.Code != http.StatusCreated {
+		t.Fatalf("reconcile status = %d body = %s", reconcileResp.Code, reconcileResp.Body.String())
+	}
+
+	statsReq := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+attached.Workspace.ID+"/stats", nil)
+	statsResp := httptest.NewRecorder()
+	handler.ServeHTTP(statsResp, statsReq)
+	if statsResp.Code != http.StatusOK {
+		t.Fatalf("stats status = %d body = %s", statsResp.Code, statsResp.Body.String())
+	}
+
 	recentReq := httptest.NewRequest(http.MethodGet, "/v1/workspaces/"+attached.Workspace.ID+"/decisions/recent", nil)
 	recentResp := httptest.NewRecorder()
 	handler.ServeHTTP(recentResp, recentReq)

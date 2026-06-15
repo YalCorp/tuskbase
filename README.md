@@ -36,7 +36,7 @@ Tuskbase is in its first implementation slice. The current product surface is us
 Implemented now:
 
 - Go CLI for setup, diagnostics, daemon lifecycle, and local key management.
-- MCP tools for `attach`, `lookup`, `preflight`, `remember`, recent decisions, and active conflicts.
+- MCP tools for `attach`, `context`, `lookup`, `check`, `preflight`, `remember`, `assess`, structured decision query, conflict resolution, reconciliation, stats, recent decisions, and active conflicts.
 - Demo stdio MCP mode for quick local experiments.
 - Local Basic daemon mode with SQLite, loopback HTTP MCP, and stdio bridge auth.
 - Local Shared mode with Postgres selected from Docker-managed pgvector Postgres or an existing pgvector-enabled Postgres DSN.
@@ -175,9 +175,16 @@ For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. Lo
 | Tool | Purpose |
 |---|---|
 | `tuskbase_attach` | Attach or refresh repo workspace context. |
-| `tuskbase_lookup` | Retrieve relevant active decisions, claims, evidence, and docs before editing. |
-| `tuskbase_preflight` | Classify whether a proposal follows, extends, duplicates, supersedes, or conflicts with active decisions. |
+| `tuskbase_context` | Return a compact workspace briefing with docs, active decisions, open conflicts, recent supersessions, degraded states, and recommended next actions. |
+| `tuskbase_lookup` | Retrieve relevant active decisions, claims, evidence, and docs before editing, with a lookup receipt. |
+| `tuskbase_check` | Run a non-mutating proposal check with relationship evidence and conflict previews. |
+| `tuskbase_preflight` | Classify whether a proposal follows, extends, duplicates, supersedes, or conflicts with active decisions, recording lookup receipts and open conflicts. |
 | `tuskbase_remember` | Store a completed decision with rationale, evidence, claims, and relationships. |
+| `tuskbase_assess` | Append feedback to a decision without rewriting the decision record. |
+| `tuskbase_query` | Query decisions by text, type, status, confidence, and relationship filters. |
+| `tuskbase_resolve_conflict` | Resolve, dismiss, or defer an existing conflict with an append-only note. |
+| `tuskbase_reconcile` | Record a reconciliation decision and close the specified conflicts. |
+| `tuskbase_stats` | Return aggregate trail-health stats for decisions, conflicts, assessments, and completeness. |
 | `tuskbase_recent` | Show recent active decisions for a workspace. |
 | `tuskbase_conflicts` | Show active conflicts for a workspace. |
 
@@ -192,9 +199,16 @@ tuskbase serve --http-mcp --rest
 | Capability | Purpose |
 |---|---|
 | Attach workspace | Create or update repo workspace context. |
-| Lookup memory | Retrieve relevant repo memory. |
-| Preflight proposal | Evaluate a proposal before an agent acts. |
+| Workspace context | Return compact repo context, active decisions, conflicts, and next actions. |
+| Lookup memory | Retrieve relevant repo memory with a receipt. |
+| Check proposal | Evaluate a proposal without mutating receipts or conflicts. |
+| Preflight proposal | Evaluate a proposal before an agent acts and record open conflicts. |
 | Remember decision | Record a final decision. |
+| Assess decision | Append feedback to a decision. |
+| Query decisions | Filter decisions by text, type, status, confidence, and relationships. |
+| Resolve conflict | Resolve, dismiss, or defer a conflict. |
+| Reconcile conflicts | Record a reconciliation decision and close conflicts. |
+| Trail stats | Report decision, conflict, assessment, and completeness health. |
 | Recent decisions | List recent decisions for a workspace. |
 | Active conflicts | List active conflicts for a workspace. |
 | Health and status | Report local server, adapter, and indexing health. |

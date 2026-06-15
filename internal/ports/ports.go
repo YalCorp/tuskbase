@@ -25,19 +25,76 @@ type DecisionStore interface {
 	SaveDecision(context.Context, domain.Decision) error
 	GetDecision(context.Context, string) (domain.Decision, error)
 	RecentDecisions(context.Context, string, int) ([]domain.Decision, error)
+	QueryDecisions(context.Context, DecisionQuery) ([]domain.Decision, error)
 }
 
 type DocumentStore interface {
 	ReplaceWorkspaceDocuments(context.Context, string, []domain.RepoDocument) error
+	ListWorkspaceDocuments(context.Context, string, int) ([]domain.RepoDocument, error)
 }
 
 type ReceiptStore interface {
 	SaveLookupReceipt(context.Context, domain.LookupReceipt) error
 }
 
+type AssessmentStore interface {
+	SaveAssessment(context.Context, domain.Assessment) error
+	ListAssessments(context.Context, AssessmentQuery) ([]domain.Assessment, error)
+}
+
 type ConflictStore interface {
 	SaveConflict(context.Context, domain.Conflict) error
+	GetConflict(context.Context, string) (domain.Conflict, error)
 	ListOpenConflicts(context.Context, string) ([]domain.Conflict, error)
+	ListConflicts(context.Context, ConflictQuery) ([]domain.Conflict, error)
+	ResolveConflict(context.Context, string, domain.ConflictStatus, time.Time, domain.ConflictResolution) (domain.Conflict, error)
+}
+
+type DecisionQuery struct {
+	WorkspaceID      string
+	Text             string
+	Type             string
+	Status           domain.DecisionStatus
+	RelationshipTo   string
+	RelationshipType domain.RelationshipType
+	MinConfidence    float64
+	Limit            int
+}
+
+type AssessmentQuery struct {
+	WorkspaceID string
+	DecisionID  string
+	Limit       int
+}
+
+type ConflictQuery struct {
+	WorkspaceID string
+	Status      domain.ConflictStatus
+	Limit       int
+}
+
+type RelationshipValidationRequest struct {
+	WorkspaceID string
+	Proposal    string
+	Decision    domain.Decision
+	Relation    domain.RelationshipType
+	Evidence    []RelationshipSignal
+}
+
+type RelationshipValidationResult struct {
+	Relation   domain.RelationshipType
+	Confidence float64
+	Reason     string
+}
+
+type RelationshipValidator interface {
+	ValidateRelationship(context.Context, RelationshipValidationRequest) (RelationshipValidationResult, error)
+}
+
+type RelationshipSignal struct {
+	Name   string  `json:"name"`
+	Detail string  `json:"detail"`
+	Weight float64 `json:"weight"`
 }
 
 // SearchIndex is the retrieval boundary used by application workflows; text, vector, or hybrid adapters can sit behind it.

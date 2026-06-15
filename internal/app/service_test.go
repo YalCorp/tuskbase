@@ -272,9 +272,108 @@ func TestNoAuthRememberStillRequiresActor(t *testing.T) {
 	}
 }
 
+func TestContextReturnsCompactWorkspaceBriefing(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	old := rememberDecision(t, ctx, service, attached.Workspace.ID, "Use SQLite for shared memory", "Use SQLite for shared agent memory.")
+	newer, err := service.Remember(ctx, app.RememberInput{
+		WorkspaceID:  attached.Workspace.ID,
+		Actor:        domain.Actor{Kind: domain.ActorAgent},
+		Type:         "architecture",
+		Title:        "Use Postgres for shared memory",
+		Outcome:      "Use Postgres for shared agent memory while SQLite remains the local basic default.",
+		Rationale:    "Shared local memory needs a multi-client store, but the local basic path should stay zero configuration and keep the same application service boundaries.",
+		Confidence:   0.86,
+		SupersedesID: old.Decision.ID,
+		Alternatives: []domain.Alternative{{Title: "Keep SQLite for shared mode", Reason: "Rejected because concurrent shared agent access needs a server database."}},
+		Evidence:     []domain.Evidence{{Kind: "plan", URI: "docs/03_product_tiers.md", Snippet: "Local Shared uses Postgres with pgvector."}},
+	})
+	if err != nil {
+		t.Fatalf("Remember() supersession error = %v", err)
+	}
+	redis := rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Redis for cache backend", "Use Redis for cache backend storage.")
+	if _, err := service.Preflight(ctx, app.PreflightInput{WorkspaceID: attached.Workspace.ID, Proposal: "Avoid Redis for cache backend storage."}); err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+
+	out, err := service.Context(ctx, app.ContextInput{WorkspaceID: attached.Workspace.ID, Limit: 5})
+	if err != nil {
+		t.Fatalf("Context() error = %v", err)
+	}
+	if out.Workspace.ID != attached.Workspace.ID {
+		t.Fatalf("workspace id = %q, want %q", out.Workspace.ID, attached.Workspace.ID)
+	}
+	if out.Workspace.DetectedDocCount < 2 {
+		t.Fatalf("DetectedDocCount = %d, want at least 2", out.Workspace.DetectedDocCount)
+	}
+	if !containsContextDocument(out.Workspace.RepoDocuments, "README.md") {
+		t.Fatalf("repo document summary missing README.md: %+v", out.Workspace.RepoDocuments)
+	}
+	if containsContextDecision(out.ActiveDecisions, old.Decision.ID) {
+		t.Fatal("Context() returned superseded decision as active")
+	}
+	if !containsContextDecision(out.ActiveDecisions, newer.Decision.ID) || !containsContextDecision(out.ActiveDecisions, redis.Decision.ID) {
+		t.Fatalf("active decisions missing expected ids: %+v", out.ActiveDecisions)
+	}
+	if len(out.OpenConflicts) == 0 {
+		t.Fatal("Context() returned no open conflicts")
+	}
+	if len(out.RecentSupersessions) == 0 || out.RecentSupersessions[0].SupersededID != old.Decision.ID {
+		t.Fatalf("RecentSupersessions = %+v, want superseded id %s", out.RecentSupersessions, old.Decision.ID)
+	}
+	if out.RecentSupersessions[0].SupersededTitle != old.Decision.Title {
+		t.Fatalf("superseded title = %q, want %q", out.RecentSupersessions[0].SupersededTitle, old.Decision.Title)
+	}
+	if !containsDegradedState(out.DegradedStates, "open_conflicts") {
+		t.Fatalf("degraded states missing open_conflicts: %+v", out.DegradedStates)
+	}
+	if !containsAction(out.RecommendedNextActions, "tuskbase_lookup") || !containsAction(out.RecommendedNextActions, "tuskbase_preflight") {
+		t.Fatalf("recommended actions missing lookup/preflight guidance: %+v", out.RecommendedNextActions)
+	}
+}
+
 func containsDecision(decisions []domain.Decision, id string) bool {
 	for _, decision := range decisions {
 		if decision.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsContextDocument(docs []app.ContextDocument, path string) bool {
+	for _, doc := range docs {
+		if doc.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func containsContextDecision(decisions []app.ContextDecision, id string) bool {
+	for _, decision := range decisions {
+		if decision.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func containsDegradedState(states []app.ContextDegraded, code string) bool {
+	for _, state := range states {
+		if state.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func containsAction(actions []string, needle string) bool {
+	for _, action := range actions {
+		if strings.Contains(action, needle) {
 			return true
 		}
 	}
@@ -317,7 +416,7 @@ func TestRememberSurvivesIndexFailure(t *testing.T) {
 	}
 }
 
-func TestPreflightRedisContradiction(t *testing.T) {
+func TestPreflightRedisConflict(t *testing.T) {
 	ctx := context.Background()
 	service, closeStore := newTestService(t)
 	defer closeStore()
@@ -329,7 +428,7 @@ func TestPreflightRedisContradiction(t *testing.T) {
 		t.Fatalf("Preflight() error = %v", err)
 	}
 	if len(out.Conflicts) == 0 {
-		t.Fatal("Preflight() did not detect Redis contradiction")
+		t.Fatal("Preflight() did not detect Redis conflict")
 	}
 }
 
@@ -346,6 +445,125 @@ func TestPreflightCompatiblePostgresTokens(t *testing.T) {
 	}
 	if len(out.Conflicts) != 0 {
 		t.Fatalf("Preflight() conflicts = %d, want 0", len(out.Conflicts))
+	}
+}
+
+func TestAssessQueryStatsAndResolveConflict(t *testing.T) {
+	ctx := context.Background()
+	store := newStore(t)
+	defer store.Close()
+	service := app.NewService(store, store, app.UUIDGenerator{}, app.SystemClock{})
+	attached := attachRepo(t, ctx, service)
+	redis := rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Redis for cache backend", "Use Redis for cache backend storage.")
+
+	if _, err := service.Assess(ctx, app.AssessInput{WorkspaceID: attached.Workspace.ID, DecisionID: redis.Decision.ID, Actor: domain.Actor{Kind: domain.ActorAgent}, Signal: "helpful", Score: 5, Summary: "This made the cache dependency explicit."}); err != nil {
+		t.Fatalf("Assess(helpful) error = %v", err)
+	}
+	if _, err := service.Assess(ctx, app.AssessInput{WorkspaceID: attached.Workspace.ID, DecisionID: redis.Decision.ID, Actor: domain.Actor{Kind: domain.ActorAgent}, Signal: "stale", Score: 2, Summary: "May need revisiting after Postgres shared mode."}); err != nil {
+		t.Fatalf("Assess(stale) error = %v", err)
+	}
+	assessments, err := store.ListAssessments(ctx, ports.AssessmentQuery{WorkspaceID: attached.Workspace.ID, DecisionID: redis.Decision.ID, Limit: 10})
+	if err != nil {
+		t.Fatalf("ListAssessments() error = %v", err)
+	}
+	if len(assessments) != 2 {
+		t.Fatalf("assessment count = %d, want 2", len(assessments))
+	}
+
+	query, err := service.Query(ctx, app.QueryInput{WorkspaceID: attached.Workspace.ID, Text: "cache", Type: "architecture", Status: string(domain.DecisionActive)})
+	if err != nil {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if !containsDecision(query.Decisions, redis.Decision.ID) {
+		t.Fatalf("Query() missing Redis decision: %+v", query.Decisions)
+	}
+
+	preflight, err := service.Preflight(ctx, app.PreflightInput{WorkspaceID: attached.Workspace.ID, Proposal: "Avoid Redis for cache backend storage."})
+	if err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+	if len(preflight.Conflicts) != 1 {
+		t.Fatalf("conflicts = %d, want 1", len(preflight.Conflicts))
+	}
+	resolved, err := service.ResolveConflict(ctx, app.ResolveConflictInput{WorkspaceID: attached.Workspace.ID, ConflictID: preflight.Conflicts[0].ID, Actor: domain.Actor{Kind: domain.ActorAgent}, Action: "dismissed", Summary: "Cache work was out of scope for the current task."})
+	if err != nil {
+		t.Fatalf("ResolveConflict() error = %v", err)
+	}
+	if resolved.Conflict.Status != domain.ConflictDismissed || resolved.Conflict.ResolvedAt == nil {
+		t.Fatalf("resolved conflict = %+v", resolved.Conflict)
+	}
+
+	stats, err := service.Stats(ctx, app.StatsInput{WorkspaceID: attached.Workspace.ID})
+	if err != nil {
+		t.Fatalf("Stats() error = %v", err)
+	}
+	if stats.AssessmentStats.Total != 2 || stats.ConflictStats.Dismissed != 1 || stats.DecisionStats.Active == 0 {
+		t.Fatalf("Stats() = %+v", stats)
+	}
+}
+
+func TestReconcileCreatesDecisionAndClosesConflict(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+	rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Redis for reset tokens", "Use Redis for password reset token storage.")
+
+	preflight, err := service.Preflight(ctx, app.PreflightInput{WorkspaceID: attached.Workspace.ID, Proposal: "Avoid Redis for password reset tokens and use Postgres instead."})
+	if err != nil {
+		t.Fatalf("Preflight() error = %v", err)
+	}
+	if len(preflight.Conflicts) == 0 {
+		t.Fatal("Preflight() returned no conflict to reconcile")
+	}
+	reconciled, err := service.Reconcile(ctx, app.ReconcileInput{
+		WorkspaceID: attached.Workspace.ID,
+		Actor:       domain.Actor{Kind: domain.ActorAgent},
+		ConflictIDs: []string{preflight.Conflicts[0].ID},
+		Title:       "Use Postgres for reset tokens",
+		Outcome:     "Use Postgres for password reset token storage and retire the Redis direction for this scope.",
+		Rationale:   "Postgres keeps reset token state in the same transactional store as users while preserving one local service boundary for the basic setup.",
+		Confidence:  0.86,
+		Evidence:    []domain.Evidence{{Kind: "test", Snippet: "Reconciliation closes the conflict."}},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if reconciled.Decision.Type != "reconciliation" {
+		t.Fatalf("reconciliation type = %q", reconciled.Decision.Type)
+	}
+	if len(reconciled.Conflicts) != 1 || reconciled.Conflicts[0].Status != domain.ConflictResolved {
+		t.Fatalf("reconciled conflicts = %+v", reconciled.Conflicts)
+	}
+	open, err := service.Conflicts(ctx, attached.Workspace.ID)
+	if err != nil {
+		t.Fatalf("Conflicts() error = %v", err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open conflicts after reconcile = %+v", open)
+	}
+	query, err := service.Query(ctx, app.QueryInput{WorkspaceID: attached.Workspace.ID, RelationshipType: string(domain.RelationshipReconciles)})
+	if err != nil {
+		t.Fatalf("Query(reconciles) error = %v", err)
+	}
+	if !containsDecision(query.Decisions, reconciled.Decision.ID) {
+		t.Fatalf("reconciliation query missing decision: %+v", query.Decisions)
+	}
+}
+
+func TestCheckAvoidsDifferentMechanismFalsePositive(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+	rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Postgres for reset tokens", "Use Postgres for password reset token storage.")
+
+	out, err := service.Check(ctx, app.CheckInput{WorkspaceID: attached.Workspace.ID, Proposal: "Avoid Redis for password reset tokens."})
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+	if !out.CanProceed || len(out.Conflicts) != 0 {
+		t.Fatalf("Check() false-positive conflict = %+v", out)
 	}
 }
 

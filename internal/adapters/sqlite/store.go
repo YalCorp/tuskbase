@@ -396,6 +396,74 @@ func (s *Store) RecentDecisions(ctx context.Context, workspaceID string, limit i
 	return decisions, nil
 }
 
+func (s *Store) QueryDecisions(ctx context.Context, q ports.DecisionQuery) ([]domain.Decision, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	clauses := []string{"workspace_id = ?"}
+	args := []any{q.WorkspaceID}
+	if q.Type != "" {
+		clauses = append(clauses, "lower(type) = lower(?)")
+		args = append(args, q.Type)
+	}
+	if q.Status != "" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, q.Status)
+	}
+	if q.MinConfidence > 0 {
+		clauses = append(clauses, "confidence >= ?")
+		args = append(args, q.MinConfidence)
+	}
+	for _, token := range searchTokens(q.Text) {
+		clauses = append(clauses, "lower(type || ' ' || title || ' ' || outcome || ' ' || rationale || ' ' || precedent_ref || ' ' || supersedes_id) LIKE ?")
+		args = append(args, "%"+token+"%")
+	}
+	if q.RelationshipTo != "" {
+		relClause := "EXISTS (SELECT 1 FROM decision_relationships r WHERE r.from_decision_id = decisions.id AND r.workspace_id = decisions.workspace_id AND r.to_decision_id = ?"
+		args = append(args, q.RelationshipTo)
+		if q.RelationshipType != "" {
+			relClause += " AND r.type = ?"
+			args = append(args, q.RelationshipType)
+		}
+		relClause += ")"
+		clauses = append(clauses, relClause)
+	} else if q.RelationshipType != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM decision_relationships r WHERE r.from_decision_id = decisions.id AND r.workspace_id = decisions.workspace_id AND r.type = ?)")
+		args = append(args, q.RelationshipType)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+decisionSelectColumns+` FROM decisions WHERE `+strings.Join(clauses, " AND ")+` ORDER BY created_at DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	var decisions []domain.Decision
+	for rows.Next() {
+		d, err := scanDecisionBase(rows)
+		if err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		decisions = append(decisions, d)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range decisions {
+		if err := s.loadDecisionChildren(ctx, &decisions[i]); err != nil {
+			return nil, err
+		}
+	}
+	return decisions, nil
+}
+
 func replaceDecisionChildren(ctx context.Context, tx *sql.Tx, d domain.Decision) error {
 	for _, table := range []string{"decision_alternatives", "decision_claims", "decision_evidence", "decision_relationships"} {
 		column := "decision_id"
@@ -583,6 +651,35 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	return tx.Commit()
 }
 
+func (s *Store) ListWorkspaceDocuments(ctx context.Context, workspaceID string, limit int) ([]domain.RepoDocument, error) {
+	if limit <= 0 {
+		limit = 1000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, path, title, content, chunk_index, created_at, updated_at
+FROM repo_documents
+WHERE workspace_id = ?
+ORDER BY path, chunk_index
+LIMIT ?
+`, workspaceID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var docs []domain.RepoDocument
+	for rows.Next() {
+		var doc domain.RepoDocument
+		var created, updated string
+		if err := rows.Scan(&doc.ID, &doc.WorkspaceID, &doc.Path, &doc.Title, &doc.Content, &doc.ChunkIndex, &created, &updated); err != nil {
+			return nil, err
+		}
+		doc.CreatedAt = parseTime(created)
+		doc.UpdatedAt = parseTime(updated)
+		docs = append(docs, doc)
+	}
+	return docs, rows.Err()
+}
+
 func (s *Store) SaveLookupReceipt(ctx context.Context, r domain.LookupReceipt) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -608,7 +705,76 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 	return tx.Commit()
 }
 
+func (s *Store) SaveAssessment(ctx context.Context, a domain.Assessment) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	actor, err := marshalJSON(a.Actor, "{}")
+	if err != nil {
+		return err
+	}
+	metadata, err := marshalJSON(a.Metadata, "{}")
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+INSERT INTO decision_assessments(id, workspace_id, decision_id, actor_json, signal, score, summary, metadata_json, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+`, a.ID, a.WorkspaceID, a.DecisionID, actor, a.Signal, a.Score, a.Summary, metadata, formatTime(a.CreatedAt))
+	return err
+}
+
+func (s *Store) ListAssessments(ctx context.Context, q ports.AssessmentQuery) ([]domain.Assessment, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	clauses := []string{"workspace_id = ?"}
+	args := []any{q.WorkspaceID}
+	if q.DecisionID != "" {
+		clauses = append(clauses, "decision_id = ?")
+		args = append(args, q.DecisionID)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, decision_id, actor_json, signal, score, summary, metadata_json, created_at
+FROM decision_assessments
+WHERE `+strings.Join(clauses, " AND ")+`
+ORDER BY created_at DESC
+LIMIT ?
+`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var assessments []domain.Assessment
+	for rows.Next() {
+		var a domain.Assessment
+		var actorJSON, metadataJSON, created string
+		if err := rows.Scan(&a.ID, &a.WorkspaceID, &a.DecisionID, &actorJSON, &a.Signal, &a.Score, &a.Summary, &metadataJSON, &created); err != nil {
+			return nil, err
+		}
+		if err := unmarshalJSON(actorJSON, &a.Actor); err != nil {
+			return nil, err
+		}
+		if err := unmarshalJSON(metadataJSON, &a.Metadata); err != nil {
+			return nil, err
+		}
+		a.CreatedAt = parseTime(created)
+		assessments = append(assessments, a)
+	}
+	return assessments, rows.Err()
+}
+
 func (s *Store) SaveConflict(ctx context.Context, c domain.Conflict) error {
+	status, err := domain.ParseConflictStatus(string(c.Status))
+	if err != nil {
+		return err
+	}
+	c.Status = status
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -616,11 +782,104 @@ func (s *Store) SaveConflict(ctx context.Context, c domain.Conflict) error {
 	if c.ResolvedAt != nil {
 		resolved = formatTime(*c.ResolvedAt)
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 INSERT INTO conflicts(id, workspace_id, decision_id, proposal, conflicting_with_id, summary, severity, confidence, status, created_at, resolved_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, c.ID, c.WorkspaceID, c.DecisionID, c.Proposal, c.ConflictingWithID, c.Summary, c.Severity, c.Confidence, c.Status, formatTime(c.CreatedAt), resolved)
 	return err
+}
+
+func (s *Store) GetConflict(ctx context.Context, id string) (domain.Conflict, error) {
+	row := s.db.QueryRowContext(ctx, `
+SELECT id, workspace_id, decision_id, proposal, conflicting_with_id, summary, severity, confidence, status, created_at, resolved_at
+FROM conflicts
+WHERE id = ?
+`, id)
+	return scanConflict(row)
+}
+
+func (s *Store) ListConflicts(ctx context.Context, q ports.ConflictQuery) ([]domain.Conflict, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	clauses := []string{"workspace_id = ?"}
+	args := []any{q.WorkspaceID}
+	if q.Status != "" {
+		clauses = append(clauses, "status = ?")
+		args = append(args, q.Status)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, `
+SELECT id, workspace_id, decision_id, proposal, conflicting_with_id, summary, severity, confidence, status, created_at, resolved_at
+FROM conflicts
+WHERE `+strings.Join(clauses, " AND ")+`
+ORDER BY created_at DESC
+LIMIT ?
+`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var conflicts []domain.Conflict
+	for rows.Next() {
+		c, err := scanConflict(rows)
+		if err != nil {
+			return nil, err
+		}
+		conflicts = append(conflicts, c)
+	}
+	return conflicts, rows.Err()
+}
+
+func (s *Store) ResolveConflict(ctx context.Context, conflictID string, status domain.ConflictStatus, resolvedAt time.Time, resolution domain.ConflictResolution) (domain.Conflict, error) {
+	if status == "" {
+		status = domain.ConflictResolved
+	}
+	if _, err := domain.ParseConflictStatus(string(status)); err != nil {
+		return domain.Conflict{}, err
+	}
+	if err := resolution.Validate(); err != nil {
+		return domain.Conflict{}, err
+	}
+	actor, err := marshalJSON(resolution.Actor, "{}")
+	if err != nil {
+		return domain.Conflict{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return domain.Conflict{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
+UPDATE conflicts
+SET status = ?, resolved_at = ?
+WHERE id = ? AND workspace_id = ?
+`, status, formatTime(resolvedAt), conflictID, resolution.WorkspaceID)
+	if err != nil {
+		return domain.Conflict{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return domain.Conflict{}, err
+	}
+	if rows == 0 {
+		return domain.Conflict{}, sql.ErrNoRows
+	}
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO conflict_resolutions(id, workspace_id, conflict_id, actor_json, action, summary, decision_id, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+`, resolution.ID, resolution.WorkspaceID, resolution.ConflictID, actor, resolution.Action, resolution.Summary, resolution.DecisionID, formatTime(resolution.CreatedAt))
+	if err != nil {
+		return domain.Conflict{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return domain.Conflict{}, err
+	}
+	return s.GetConflict(ctx, conflictID)
 }
 
 func (s *Store) ListOpenConflicts(ctx context.Context, workspaceID string) ([]domain.Conflict, error) {
@@ -652,6 +911,21 @@ ORDER BY c.created_at DESC
 		conflicts = append(conflicts, c)
 	}
 	return conflicts, rows.Err()
+}
+
+func scanConflict(row rowScanner) (domain.Conflict, error) {
+	var c domain.Conflict
+	var created string
+	var resolved sql.NullString
+	if err := row.Scan(&c.ID, &c.WorkspaceID, &c.DecisionID, &c.Proposal, &c.ConflictingWithID, &c.Summary, &c.Severity, &c.Confidence, &c.Status, &created, &resolved); err != nil {
+		return domain.Conflict{}, err
+	}
+	c.CreatedAt = parseTime(created)
+	if resolved.Valid {
+		t := parseTime(resolved.String)
+		c.ResolvedAt = &t
+	}
+	return c, nil
 }
 
 func (s *Store) IndexDecision(ctx context.Context, d domain.Decision) error {
@@ -972,6 +1246,26 @@ func parseTime(value string) time.Time {
 }
 
 var ftsTokenRE = regexp.MustCompile(`[A-Za-z0-9_]+`)
+
+func searchTokens(query string) []string {
+	raw := ftsTokenRE.FindAllString(strings.ToLower(query), -1)
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(raw))
+	for _, token := range raw {
+		if len(token) < 2 {
+			continue
+		}
+		if _, ok := seen[token]; ok {
+			continue
+		}
+		seen[token] = struct{}{}
+		out = append(out, token)
+		if len(out) == 12 {
+			break
+		}
+	}
+	return out
+}
 
 func ftsQuery(query string) string {
 	tokens := ftsTokenRE.FindAllString(strings.ToLower(query), -1)

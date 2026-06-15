@@ -31,8 +31,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/decisions", s.remember)
 	s.mux.HandleFunc("POST /v1/lookup", s.lookup)
 	s.mux.HandleFunc("POST /v1/preflight", s.preflight)
+	s.mux.HandleFunc("POST /v1/check", s.check)
+	s.mux.HandleFunc("POST /v1/assessments", s.assess)
+	s.mux.HandleFunc("POST /v1/decisions/query", s.queryDecisions)
+	s.mux.HandleFunc("POST /v1/conflicts/resolve", s.resolveConflict)
+	s.mux.HandleFunc("POST /v1/reconcile", s.reconcile)
+	s.mux.HandleFunc("GET /v1/workspaces/{id}/context", s.workspaceContext)
 	s.mux.HandleFunc("GET /v1/workspaces/{id}/decisions/recent", s.recent)
 	s.mux.HandleFunc("GET /v1/workspaces/{id}/conflicts", s.conflicts)
+	s.mux.HandleFunc("GET /v1/workspaces/{id}/stats", s.stats)
 }
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) {
@@ -95,6 +102,90 @@ func (s *Server) preflight(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) check(w http.ResponseWriter, r *http.Request) {
+	var in app.CheckInput
+	if err := readJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.Check(r.Context(), in)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) assess(w http.ResponseWriter, r *http.Request) {
+	var in app.AssessInput
+	if err := readJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.Assess(r.Context(), in)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) queryDecisions(w http.ResponseWriter, r *http.Request) {
+	var in app.QueryInput
+	if err := readJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.Query(r.Context(), in)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) resolveConflict(w http.ResponseWriter, r *http.Request) {
+	var in app.ResolveConflictInput
+	if err := readJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.ResolveConflict(r.Context(), in)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
+	var in app.ReconcileInput
+	if err := readJSON(r, &in); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.Reconcile(r.Context(), in)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) workspaceContext(w http.ResponseWriter, r *http.Request) {
+	limit, err := queryLimit(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.service.Context(r.Context(), app.ContextInput{WorkspaceID: r.PathValue("id"), Limit: limit})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) recent(w http.ResponseWriter, r *http.Request) {
 	limit, err := queryLimit(r)
 	if err != nil {
@@ -116,6 +207,15 @@ func (s *Server) conflicts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"conflicts": conflicts})
+}
+
+func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
+	out, err := s.service.Stats(r.Context(), app.StatsInput{WorkspaceID: r.PathValue("id")})
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func readJSON(r *http.Request, out any) error {

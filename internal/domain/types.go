@@ -94,6 +94,33 @@ func ParseConflictSeverity(value string) (ConflictSeverity, error) {
 	}
 }
 
+type ConflictStatus string
+
+const (
+	ConflictOpen      ConflictStatus = "open"
+	ConflictResolved  ConflictStatus = "resolved"
+	ConflictDismissed ConflictStatus = "dismissed"
+	ConflictDeferred  ConflictStatus = "deferred"
+)
+
+func ParseConflictStatus(value string) (ConflictStatus, error) {
+	if strings.TrimSpace(value) == "" {
+		return ConflictOpen, nil
+	}
+	switch ConflictStatus(strings.ToLower(strings.TrimSpace(value))) {
+	case ConflictOpen:
+		return ConflictOpen, nil
+	case ConflictResolved:
+		return ConflictResolved, nil
+	case ConflictDismissed:
+		return ConflictDismissed, nil
+	case ConflictDeferred:
+		return ConflictDeferred, nil
+	default:
+		return "", fmt.Errorf("invalid conflict status %q", value)
+	}
+}
+
 type DecisionStatus string
 
 const (
@@ -159,7 +186,7 @@ type Decision struct {
 	Evidence          []Evidence             `json:"evidence,omitempty"`
 	Relationships     []DecisionRelationship `json:"relationships,omitempty"`
 	PrecedentRef      string                 `json:"precedent_ref,omitempty"`
-	SupersedesID       string                 `json:"supersedes_id,omitempty"`
+	SupersedesID      string                 `json:"supersedes_id,omitempty"`
 	CompletenessScore float64                `json:"completeness_score"`
 	Metadata          map[string]any         `json:"metadata,omitempty"`
 	CreatedAt         time.Time              `json:"created_at"`
@@ -298,6 +325,40 @@ type LookupReceiptResult struct {
 	Score       float64 `json:"score"`
 }
 
+type Assessment struct {
+	ID          string         `json:"id"`
+	WorkspaceID string         `json:"workspace_id"`
+	DecisionID  string         `json:"decision_id"`
+	Actor       Actor          `json:"actor"`
+	Signal      string         `json:"signal"`
+	Score       int            `json:"score,omitempty"`
+	Summary     string         `json:"summary,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+func (a Assessment) Validate() error {
+	if strings.TrimSpace(a.ID) == "" {
+		return errors.New("assessment id is required")
+	}
+	if strings.TrimSpace(a.WorkspaceID) == "" {
+		return errors.New("assessment workspace_id is required")
+	}
+	if strings.TrimSpace(a.DecisionID) == "" {
+		return errors.New("assessment decision_id is required")
+	}
+	if err := a.Actor.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(a.Signal) == "" {
+		return errors.New("assessment signal is required")
+	}
+	if a.Score < 0 || a.Score > 5 {
+		return errors.New("assessment score must be between 0 and 5")
+	}
+	return nil
+}
+
 type Conflict struct {
 	ID                string           `json:"id"`
 	WorkspaceID       string           `json:"workspace_id"`
@@ -307,7 +368,7 @@ type Conflict struct {
 	Summary           string           `json:"summary"`
 	Severity          ConflictSeverity `json:"severity"`
 	Confidence        float64          `json:"confidence"`
-	Status            string           `json:"status"`
+	Status            ConflictStatus   `json:"status"`
 	CreatedAt         time.Time        `json:"created_at"`
 	ResolvedAt        *time.Time       `json:"resolved_at,omitempty"`
 }
@@ -330,6 +391,42 @@ func (c Conflict) Validate() error {
 	}
 	if c.Confidence < 0 || c.Confidence > 1 {
 		return errors.New("conflict confidence must be between 0 and 1")
+	}
+	if _, err := ParseConflictStatus(string(c.Status)); err != nil {
+		return err
+	}
+	return nil
+}
+
+type ConflictResolution struct {
+	ID          string    `json:"id"`
+	WorkspaceID string    `json:"workspace_id"`
+	ConflictID  string    `json:"conflict_id"`
+	Actor       Actor     `json:"actor"`
+	Action      string    `json:"action"`
+	Summary     string    `json:"summary"`
+	DecisionID  string    `json:"decision_id,omitempty"`
+	CreatedAt   time.Time `json:"created_at"`
+}
+
+func (r ConflictResolution) Validate() error {
+	if strings.TrimSpace(r.ID) == "" {
+		return errors.New("conflict resolution id is required")
+	}
+	if strings.TrimSpace(r.WorkspaceID) == "" {
+		return errors.New("conflict resolution workspace_id is required")
+	}
+	if strings.TrimSpace(r.ConflictID) == "" {
+		return errors.New("conflict resolution conflict_id is required")
+	}
+	if err := r.Actor.Validate(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(r.Action) == "" {
+		return errors.New("conflict resolution action is required")
+	}
+	if strings.TrimSpace(r.Summary) == "" {
+		return errors.New("conflict resolution summary is required")
 	}
 	return nil
 }

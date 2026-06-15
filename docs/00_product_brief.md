@@ -87,9 +87,11 @@ Tuskbase returns relevant decisions, claims, repo document chunks, active confli
 
 ### Check Before Acting
 
-An agent calls:
+An agent starts with a compact briefing, can run a non-mutating check, then calls task-specific lookup and preflight when the plan is meaningful enough to record:
 
 ```text
+tuskbase_context
+tuskbase_check
 tuskbase_lookup
 tuskbase_preflight
 ```
@@ -153,5 +155,5 @@ Phase 1 is credible when:
 - preflight catches the Redis conflict example,
 - preflight does not mislabel compatible Postgres token decisions as conflicts,
 - the local Go service hosts the API and MCP surfaces through the same application core,
-- API and MCP expose the same core loop,
+- API and MCP expose the same core loop plus assessment, structured query, conflict resolution, reconciliation, stats, and compact workspace context through the same application core,
 - default tests run without external embedding services.

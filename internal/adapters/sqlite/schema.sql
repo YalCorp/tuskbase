@@ -124,6 +124,22 @@ CREATE TABLE IF NOT EXISTS lookup_receipt_results (
     PRIMARY KEY(receipt_id, position)
 );
 
+
+CREATE TABLE IF NOT EXISTS decision_assessments (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+    actor_json TEXT NOT NULL,
+    signal TEXT NOT NULL,
+    score INTEGER NOT NULL DEFAULT 0,
+    summary TEXT NOT NULL DEFAULT '',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_assessments_workspace_decision
+ON decision_assessments(workspace_id, decision_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS conflicts (
     id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -140,6 +156,20 @@ CREATE TABLE IF NOT EXISTS conflicts (
 
 CREATE INDEX IF NOT EXISTS idx_conflicts_workspace_status
 ON conflicts(workspace_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS conflict_resolutions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    conflict_id TEXT NOT NULL REFERENCES conflicts(id) ON DELETE CASCADE,
+    actor_json TEXT NOT NULL,
+    action TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    decision_id TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_conflict_resolutions_conflict
+ON conflict_resolutions(workspace_id, conflict_id, created_at DESC);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS search_index USING fts5(
     workspace_id UNINDEXED,
