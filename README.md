@@ -45,6 +45,7 @@ Implemented now:
 - Semantic active-memory lookup with pgvector when embeddings are configured, deterministic text fallback, preflight conflict detection, lookup receipts, and optional OpenAI or Ollama embeddings.
 - Local bearer auth for HTTP MCP/REST, auth-derived actor attribution, and named Local Shared agent keys.
 - `tuskbase doctor` and bridge diagnostics for common local setup failures.
+- Compressed local disaster-recovery backups for Local Basic SQLite and Docker-managed Local Shared Postgres, with manual create/list/restore commands and automatic write-triggered retention.
 - Optional REST API for local development/debugging.
 
 Deferred:
@@ -145,6 +146,8 @@ For the full setup matrix, Docker context notes, and inspectable templates, see 
 tuskbase status
 tuskbase doctor
 tuskbase daemon restart
+tuskbase backup create
+tuskbase backup list
 tuskbase auth list
 tuskbase auth rotate
 tuskbase auth add --name windsurf --role agent
@@ -152,6 +155,22 @@ tuskbase auth rotate --name codex
 ```
 
 Manual HTTP/environment-variable setup is available for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set. See [.env.example](.env.example).
+
+## Backup And Restore
+
+Tuskbase stores compressed backups outside Docker volumes by default, under the local Tuskbase data area. Automatic backups run after successful durable decision, conflict, conflict-resolution, and assessment writes. Lookup receipts do not trigger backups. The latest 20 automatic backups are retained by default; manual backups are never pruned automatically.
+
+```bash
+tuskbase backup create
+tuskbase backup list
+tuskbase daemon stop
+tuskbase backup restore /path/to/backup.tar.gz --yes
+tuskbase daemon restart
+```
+
+Restore refuses to run while the daemon is reachable. Pass `--stop-daemon` to request a service stop first. SQLite restore writes a timestamped safety copy of the current database. Docker-managed Local Shared restore uses `pg_restore --clean --if-exists`. Existing Postgres DSNs are intentionally excluded from V1 backup automation; use the database provider's backup tooling.
+
+Backups contain Tuskbase memory, not API keys, MCP client configuration, Docker credentials, or other local secrets. Configure behavior with `TUSKBASE_BACKUP_DIR`, `TUSKBASE_BACKUP_AUTO=false`, and `TUSKBASE_BACKUP_AUTO_RETENTION`.
 
 ## Troubleshooting
 
@@ -171,6 +190,8 @@ If an MCP client reports that Tuskbase closed during initialization, check `tusk
 Newer Tuskbase builds report these as `store_runtime`, `postgres_connect`, and repair hints in `doctor` output. The bridge also exposes a `tuskbase_diagnostics` tool when daemon-backed MCP tools cannot be reached.
 
 For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. Local Basic does not require Docker.
+
+Docker volume loss can be recovered from a Tuskbase backup with `tuskbase backup restore <file> --yes --stop-daemon`. Check `tuskbase doctor` for the backup directory and the last automatic backup error.
 
 ## Current Interfaces
 

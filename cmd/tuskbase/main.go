@@ -14,10 +14,13 @@ import (
 	"runtime"
 	"strings"
 	"syscall"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 
 	"github.com/priyavratuniyal/tuskbase/internal/adapters/embeddings"
+	"github.com/priyavratuniyal/tuskbase/internal/app"
+	"github.com/priyavratuniyal/tuskbase/internal/backup"
 	"github.com/priyavratuniyal/tuskbase/internal/daemon"
 	"github.com/priyavratuniyal/tuskbase/internal/ports"
 )
@@ -65,6 +68,8 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runServe(ctx, args[1:], stdout, stderr)
 	case "daemon":
 		return runDaemonCommand(ctx, args[1:], stdout, stderr)
+	case "backup":
+		return runBackupCommand(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, args[1:], stdout, stderr)
 	case "init":
@@ -108,7 +113,7 @@ func runServe(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 
 func runDaemonCommand(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	if len(args) == 0 {
-		fmt.Fprintln(stdout, "Usage: tuskbase daemon <start|status|install|uninstall|restart>")
+		fmt.Fprintln(stdout, "Usage: tuskbase daemon <start|status|install|uninstall|restart|stop>")
 		return nil
 	}
 	switch args[0] {
@@ -134,6 +139,12 @@ func runDaemonCommand(ctx context.Context, args []string, stdout, stderr io.Writ
 			return err
 		}
 		return printDaemonLifecycleResult(stdout, "restart", newLifecycleController().Restart(ctx, cfg))
+	case "stop":
+		cfg, err := daemonCommandConfig(args[1:], stderr)
+		if err != nil {
+			return err
+		}
+		return printDaemonLifecycleResult(stdout, "stop", newLifecycleController().Stop(ctx, cfg))
 	default:
 		return fmt.Errorf("unknown daemon command %q", args[0])
 	}
@@ -299,6 +310,29 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	p.KV("log_path", status.LogPath)
 	printEmbeddingDoctor(stdout)
 	if p.pretty {
+		p.Section("Backups")
+	}
+	backupCfg, backupAuto := configuredBackupConfig(store)
+	p.KV("backup_dir", backupCfg.Dir)
+	p.KV("backup_auto", fmt.Sprintf("%t", backupAuto))
+	p.KV("backup_auto_retention", fmt.Sprintf("%d", backupCfg.Retention))
+	externalPostgres := store.Type == storePostgres && backupCfg.PostgresSource != postgresSourceDocker
+	if externalPostgres {
+		p.KV("backup_status", "external Postgres; use your database backup tooling")
+	} else if manager, err := backup.NewManager(backupCfg); err == nil {
+		if backupStatus, err := manager.Status(); err == nil {
+			if backupStatus.LastAutoError != "" {
+				p.KV("backup_status", "degraded")
+				p.KV("backup_error", backupStatus.LastAutoError)
+			} else if !backupStatus.LastAutoAt.IsZero() {
+				p.KV("backup_status", "ok")
+				p.KV("backup_last_auto", backupStatus.LastAutoAt.Format(time.RFC3339))
+			} else {
+				p.KV("backup_status", "no automatic backups recorded")
+			}
+		}
+	}
+	if p.pretty {
 		p.Section("Next")
 	}
 	p.KV("clients", "codex, claude, cursor, generic (print with `tuskbase connect <client>`)")
@@ -372,6 +406,8 @@ type runtimeConfig struct {
 	REST       bool
 	Embeddings ports.EmbeddingProvider
 	Auth       daemon.AuthPolicy
+	Backup     backup.Config
+	BackupAuto bool
 }
 
 func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, error) {
@@ -392,7 +428,8 @@ func loadRuntimeConfig(addr, dbPath string, httpMCP, rest bool) (runtimeConfig, 
 	if err != nil {
 		return runtimeConfig{}, err
 	}
-	return runtimeConfig{Addr: addr, DBPath: dbPath, Store: store, HTTPMCP: httpMCP, REST: rest, Embeddings: emb, Auth: authPolicy}, nil
+	backupCfg, backupAuto := configuredBackupConfig(store)
+	return runtimeConfig{Addr: addr, DBPath: dbPath, Store: store, HTTPMCP: httpMCP, REST: rest, Embeddings: emb, Auth: authPolicy, Backup: backupCfg, BackupAuto: backupAuto}, nil
 }
 
 func newDaemon(ctx context.Context, cfg runtimeConfig) (*daemon.TuskbaseDaemon, error) {
@@ -401,7 +438,17 @@ func newDaemon(ctx context.Context, cfg runtimeConfig) (*daemon.TuskbaseDaemon, 
 	if err != nil {
 		return nil, err
 	}
-	return daemon.New(ctx, daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}, factory, cfg.Auth)
+	daemonCfg := daemon.Config{Addr: cfg.Addr, EnableMCP: cfg.HTTPMCP, EnableREST: cfg.REST, Version: version, Logger: logger}
+	if cfg.BackupAuto {
+		manager, err := backup.NewManager(cfg.Backup)
+		if err != nil {
+			return nil, err
+		}
+		daemonCfg.StoreMiddleware = func(store app.Store) app.Store {
+			return backup.WrapStore(store, manager, logger)
+		}
+	}
+	return daemon.New(ctx, daemonCfg, factory, cfg.Auth)
 }
 
 func storeFactoryForRuntime(cfg runtimeConfig, logger *slog.Logger) (daemon.StoreFactory, error) {
@@ -631,6 +678,10 @@ func printUsage(w io.Writer) {
 		p.Section("Service")
 		p.Line("  start             Start the local Tuskbase daemon")
 		p.Line("  bridge            Run stdio MCP bridge with Tuskbase-managed local auth")
+		p.Section("Backup")
+		p.Line("  backup create     Create a compressed local backup")
+		p.Line("  backup list       List local backups")
+		p.Line("  backup restore    Restore a backup after confirmation")
 		p.Section("Auth")
 		p.Line("  auth list         Show local auth keys; use --reveal to print secrets")
 		p.Line("  auth rotate       Rotate Local Basic or Local Shared keys")
@@ -654,6 +705,9 @@ Commands:
   connect [client]  Print MCP setup for codex, claude, cursor, or generic
   bridge            Run stdio MCP bridge with Tuskbase-managed local auth
   doctor            Check local setup
+  backup create     Create a compressed local backup
+  backup list       List local backups
+  backup restore    Restore a backup after confirmation
   version           Print version info
 
 Advanced:
@@ -670,6 +724,7 @@ Compatibility:
   daemon status           Alias for status
   daemon install          Install and start user-scope autostart
   daemon restart          Restart the user-scope daemon service
+  daemon stop             Stop the user-scope daemon service
   daemon uninstall        Remove user-scope autostart
   -mode mcp|http|both     Legacy mode flag
 
@@ -683,5 +738,8 @@ Environment:
   TUSKBASE_POSTGRES_DSN   Postgres DSN for Local Shared
   TUSKBASE_POSTGRES_DRIVER Postgres database/sql driver; defaults to pgx
   TUSKBASE_DOCKER_CONTEXT Docker context for Local Shared Docker setup; use auto to opt into desktop-linux fallback
+  TUSKBASE_BACKUP_DIR     Override local backup directory
+  TUSKBASE_BACKUP_AUTO    Set false to disable automatic write-triggered backups
+  TUSKBASE_BACKUP_AUTO_RETENTION Number of automatic backups to keep; defaults to 20
 `)
 }

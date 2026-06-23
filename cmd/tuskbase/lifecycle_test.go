@@ -25,6 +25,7 @@ var defaultTestLifecycle = &testLifecycleController{
 func TestMain(m *testing.M) {
 	newLifecycleController = func() lifecycleController { return defaultTestLifecycle }
 	newDockerPostgresProvisioner = func() dockerPostgresProvisioner { return testDockerPostgresProvisioner{} }
+	_ = os.Setenv("TUSKBASE_BACKUP_AUTO", "false")
 	os.Exit(m.Run())
 }
 
@@ -309,6 +310,26 @@ func TestDaemonAdminCommandReturnsErrorForDegradedResultWithoutCause(t *testing.
 	}
 }
 
+func TestDaemonStopUsesLifecycleStop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	t.Setenv("TUSKBASE_CONFIG_PATH", path)
+	if err := saveUserConfig(path, testLocalConfig()); err != nil {
+		t.Fatalf("saveUserConfig() error = %v", err)
+	}
+	controller := &testLifecycleController{result: lifecycleResult{Backend: "test", State: "stopped"}}
+	withLifecycle(t, controller)
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"daemon", "stop"}, &out, &errb); err != nil {
+		t.Fatalf("daemon stop error = %v", err)
+	}
+	if got := atomic.LoadInt32(&controller.stopCalls); got != 1 {
+		t.Fatalf("Stop calls = %d, want 1", got)
+	}
+	if !strings.Contains(out.String(), "service: stopped") {
+		t.Fatalf("daemon stop output = %q", out.String())
+	}
+}
+
 func TestPlatformRenderersContainDaemonSurfacesAndNoSecrets(t *testing.T) {
 	cfg := testLocalConfig()
 	cfg.APIKey = "tbk_secret"
@@ -425,6 +446,7 @@ func testLocalConfig() userConfig {
 type testLifecycleController struct {
 	installCalls int32
 	ensureCalls  int32
+	stopCalls    int32
 	result       lifecycleResult
 	status       lifecycleStatus
 	ensureErr    error
@@ -446,6 +468,10 @@ func (c *testLifecycleController) Uninstall(context.Context, userConfig) lifecyc
 func (c *testLifecycleController) Restart(context.Context, userConfig) lifecycleResult {
 	return c.result
 }
+func (c *testLifecycleController) Stop(context.Context, userConfig) lifecycleResult {
+	atomic.AddInt32(&c.stopCalls, 1)
+	return c.result
+}
 func (c *testLifecycleController) Status(context.Context, userConfig) lifecycleStatus {
 	return c.status
 }
@@ -465,6 +491,7 @@ func (m *testServiceManager) Start(context.Context, userConfig) error {
 func (m *testServiceManager) Restart(context.Context, userConfig) error {
 	return m.Start(context.Background(), userConfig{})
 }
+func (m *testServiceManager) Stop(context.Context, userConfig) error { return nil }
 func (m *testServiceManager) Status(context.Context, userConfig) serviceStatus {
 	return serviceStatus{Backend: m.backend, State: "test", Autostart: "test"}
 }

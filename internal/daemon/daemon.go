@@ -18,14 +18,15 @@ import (
 
 // Config describes a daemon runtime, not a specific tier. Local Shared and Hosted should reuse this shape with stronger stores and auth.
 type Config struct {
-	Addr        string
-	MCPPath     string
-	EnableMCP   bool
-	EnableREST  bool
-	Name        string
-	Version     string
-	Logger      *slog.Logger
-	ReadTimeout time.Duration
+	Addr            string
+	MCPPath         string
+	EnableMCP       bool
+	EnableREST      bool
+	Name            string
+	Version         string
+	Logger          *slog.Logger
+	ReadTimeout     time.Duration
+	StoreMiddleware func(app.Store) app.Store
 }
 
 // StoreBundle groups canonical storage with retrieval so a tier can swap SQLite for Postgres without changing the daemon core.
@@ -140,6 +141,9 @@ func New(ctx context.Context, cfg Config, stores StoreFactory, auth AuthPolicy) 
 	if bundle.Search == nil {
 		_ = bundle.Close()
 		return nil, errors.New("search index is required")
+	}
+	if cfg.StoreMiddleware != nil {
+		bundle.Store = cfg.StoreMiddleware(bundle.Store)
 	}
 	service := app.NewService(bundle.Store, bundle.Search, app.UUIDGenerator{}, app.SystemClock{})
 	d := &TuskbaseDaemon{cfg: cfg, bundle: bundle, service: service, auth: auth}

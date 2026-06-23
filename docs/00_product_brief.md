@@ -70,6 +70,7 @@ The first product surfaces are:
 
 - local HTTP API server,
 - local MCP server.
+- local disaster-recovery backup and restore commands for Tuskbase-owned stores.
 
 The API and MCP server should expose the same core loop through shared application use cases. The first implementation should be a Go local service that can run both surfaces from one process.
 
@@ -158,6 +159,7 @@ Generic facts may be stored only when they support repo context, decisions, clai
 - Search is a retrieval layer, not the source of truth.
 - Canonical records live behind replaceable store interfaces.
 - Vector indexes are rebuildable.
+- Local canonical memory should have inspectable backups outside the primary SQLite file or Docker volume.
 - Local-first value comes before cloud features.
 - API and MCP should work before UI polish or SDKs.
 - Agents need concise, action-oriented output.

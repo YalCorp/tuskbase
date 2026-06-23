@@ -81,6 +81,7 @@ Technology:
 - text search by default,
 - optional OpenAI embeddings,
 - optional local embedding providers later.
+- compressed SQLite disaster-recovery backups outside the database path, including automatic backups after durable memory writes.
 
 Why SQLite can work here:
 
@@ -122,6 +123,7 @@ Current foundation:
 - setup source selection with `--postgres-source auto|docker|existing`; the older Supabase path is not a current focus,
 - Docker-managed Postgres+pgvector provisioning when no DSN is supplied,
 - semantic pgvector search when embeddings are configured, with deterministic text search backed by the selected durable store as fallback.
+- compressed `pg_dump -Fc` backups and `pg_restore --clean --if-exists` restore for Docker-managed Postgres.
 
 Next steps:
 
@@ -254,6 +256,21 @@ tuskbase setup --mode local-shared --postgres-source existing --postgres-dsn <ds
 ```
 
 Semantic pgvector retrieval is available when `TUSKBASE_EMBEDDING_PROVIDER` is set to `ollama` or `openai`. Local Shared keeps Postgres as the durable store and falls back to deterministic text search when embeddings are disabled or vector indexing fails.
+
+### Local Backup Recovery
+
+Manual and automatic backups are stored outside the SQLite database and Docker Postgres volume:
+
+```bash
+tuskbase backup create
+tuskbase backup list
+tuskbase backup restore <file> --yes --stop-daemon
+tuskbase daemon restart
+```
+
+Automatic retention keeps the latest 20 automatic backups by default and never prunes manual backups. SQLite restore makes a safety copy of the current database first. Docker-managed Local Shared restore recreates database objects from the custom-format dump. Existing Postgres DSNs remain the database owner's responsibility in V1; use provider-native backup tooling.
+
+Backups cover Tuskbase memory only. They do not contain API keys, MCP client config, Docker credentials, or Docker volumes themselves.
 
 ## Hosted
 

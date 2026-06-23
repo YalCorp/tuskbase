@@ -26,6 +26,8 @@ The intended runtime is a Go local service. Go is a product delivery choice: it 
 
 Later surfaces, such as a UI or SDKs, should use the same contracts or application core rather than introducing separate business logic. Daemon lifecycle management belongs at the CLI/composition edge: setup, bridge, status, and doctor may install, start, wake, or report on the local daemon, but domain and application use cases should remain unaware of systemd, launchd, scheduled tasks, or detached process fallback.
 
+Backup and restore also belong at the composition edge. Automatic backups wrap successful canonical store mutations without changing domain rules. Backup failure is operational degradation: it is logged and reported by `doctor`, but it must not roll back a successful memory write.
+
 ```text
 HTTP API / MCP / later UI / later SDKs / optional support CLI
   -> application use cases
@@ -102,6 +104,7 @@ Phase 1 should not include cloud auth, enterprise governance, RBAC, or multi-ten
 - Never lose a decision because embedding generation fails.
 - Store canonical decision records before derived indexes.
 - Mark derived indexing as pending or repairable when it fails.
+- Never fail a successful canonical write because an automatic backup failed.
 - Default tests should not depend on network access or real embedding services.
 
 ## Architecture Guardrails

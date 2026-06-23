@@ -40,6 +40,7 @@ type lifecycleController interface {
 	InstallAndStart(context.Context, userConfig) lifecycleResult
 	Uninstall(context.Context, userConfig) lifecycleResult
 	Restart(context.Context, userConfig) lifecycleResult
+	Stop(context.Context, userConfig) lifecycleResult
 	Status(context.Context, userConfig) lifecycleStatus
 }
 
@@ -68,6 +69,7 @@ type userServiceManager interface {
 	Uninstall(context.Context, userConfig) error
 	Start(context.Context, userConfig) error
 	Restart(context.Context, userConfig) error
+	Stop(context.Context, userConfig) error
 	Status(context.Context, userConfig) serviceStatus
 }
 
@@ -220,6 +222,20 @@ func (c *defaultLifecycleController) Restart(ctx context.Context, cfg userConfig
 	}
 	result.State = "running"
 	result.Detail = "daemon restarted and ready"
+	return result
+}
+
+func (c *defaultLifecycleController) Stop(ctx context.Context, cfg userConfig) lifecycleResult {
+	cfg = normalizedDaemonConfig(cfg)
+	result := lifecycleResult{Backend: c.services.Backend(), LogPath: c.logPath()}
+	if err := c.services.Stop(ctx, cfg); err != nil {
+		result.State = "degraded"
+		result.Degraded = true
+		result.Err = err
+		return result
+	}
+	result.State = "stopped"
+	result.Detail = "daemon stop requested"
 	return result
 }
 
@@ -681,6 +697,29 @@ func (m osUserServiceManager) Restart(ctx context.Context, cfg userConfig) error
 		_ = runServiceCommand(ctx, "schtasks", "/End", "/TN", windowsTaskName)
 		return m.Start(ctx, cfg)
 	default:
+		return errServiceUnsupported
+	}
+}
+
+func (m osUserServiceManager) Stop(ctx context.Context, cfg userConfig) error {
+	switch m.goos {
+	case "linux":
+		if _, err := exec.LookPath("systemctl"); err != nil {
+			return err
+		}
+		return runServiceCommand(ctx, "systemctl", "--user", "stop", systemdUnitName)
+	case "darwin":
+		if _, err := exec.LookPath("launchctl"); err != nil {
+			return err
+		}
+		return runServiceCommand(ctx, "launchctl", "remove", launchdLabel)
+	case "windows":
+		if _, err := exec.LookPath("schtasks"); err != nil {
+			return err
+		}
+		return runServiceCommand(ctx, "schtasks", "/End", "/TN", windowsTaskName)
+	default:
+		_ = cfg
 		return errServiceUnsupported
 	}
 }
