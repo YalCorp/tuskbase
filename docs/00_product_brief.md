@@ -31,6 +31,12 @@ Tuskbase turns that hidden drift into an explicit workflow:
 look up context -> preflight proposal -> remember final decision -> detect conflicts
 ```
 
+For compliant MCP-connected coding agents, the preferred workflow is automatic:
+
+```text
+prepare_change before edits -> edit only when should_edit=true -> finish_change after verification
+```
+
 ## Product Wedge
 
 The wedge is not "a better notes app." The wedge is decision hygiene for AI coding agents.
@@ -55,6 +61,8 @@ Each part has a specific job:
 - `lookup`: retrieve prior decisions, claims, repo documents, active conflicts, and constraints.
 - `preflight`: evaluate a proposal before committing to it.
 - `remember`: store the final decision with evidence and relationships.
+
+These are primitives. The preferred agent path is `tuskbase_prepare_change` before editing and `tuskbase_finish_change` after verification. The high-level tools compose the primitives so users can ask for normal coding work while compliant agents check memory automatically.
 
 ## Primary Product Surfaces
 
@@ -87,7 +95,15 @@ Tuskbase returns relevant decisions, claims, repo document chunks, active confli
 
 ### Check Before Acting
 
-An agent starts with a compact briefing, can run a non-mutating check, then calls task-specific lookup and preflight when the plan is meaningful enough to record:
+An agent should call the high-level prepare workflow before editing:
+
+```text
+tuskbase_prepare_change
+```
+
+The response includes context, recent decisions, open conflicts, lookup results, optional preflight, a verdict, `should_edit`, and next actions. If `should_edit=false`, the agent stops before file edits and asks the user how to proceed.
+
+The lower-level primitives remain available for manual use and custom clients:
 
 ```text
 tuskbase_context
@@ -102,15 +118,17 @@ The response should answer:
 - Does this proposal follow, extend, supersede, duplicate, or conflict with that?
 - What should the agent do next?
 
+Conflict resolution and superseding an active decision require explicit user approval before the agent records a resolution, reconciliation, or superseding decision.
+
 ### Remember After Acting
 
-An agent calls:
+After verification, an agent calls:
 
 ```text
-tuskbase_remember
+tuskbase_finish_change
 ```
 
-The stored decision includes outcome, reasoning, confidence, evidence, files, considered options, extracted claims, and graph relationships.
+If no durable decision was made, the finish workflow reports the work summary and skips memory writes. If a durable decision is supplied, it stores the decision through the same remember path. The stored decision includes outcome, reasoning, confidence, evidence, considered options, extracted claims, and graph relationships.
 
 ### Continue Across Tools
 

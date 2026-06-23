@@ -14,6 +14,8 @@ The core product behavior is repo-aware decision memory:
 - remember final decisions,
 - surface conflicts when new work contradicts active context.
 
+The preferred MCP agent workflow composes those primitives into two application use cases: prepare a change before editing and finish a change after verification. Low-level primitives remain part of the contract for manual clients and advanced integrations.
+
 Those behaviors should live in the domain and application layers. Technologies such as API frameworks, MCP SDKs, databases, vector stores, embedding providers, queues, UI frameworks, SDKs, and optional CLIs belong at the edges.
 
 ## Runtime Shape
@@ -42,9 +44,11 @@ The domain layer should not know where data is stored, how embeddings are genera
 
 ### Application Use Cases
 
-Application use cases own workflows such as attaching a workspace, looking up memory, preflighting a proposal, remembering a decision, listing recent decisions, listing conflicts, appending assessments, querying structured decision trails, resolving or reconciling conflicts, producing trail stats, and producing compact workspace context.
+Application use cases own workflows such as preparing a change, finishing a change, attaching a workspace, looking up memory, preflighting a proposal, remembering a decision, listing recent decisions, listing conflicts, appending assessments, querying structured decision trails, resolving or reconciling conflicts, producing trail stats, and producing compact workspace context.
 
 Use cases should orchestrate interfaces. They should not call raw SQL, framework handlers, provider SDKs, queue clients, UI code, or MCP code directly.
+
+Preflight conflicts are hard stops for automated editing. Resolving conflicts, reconciling conflicts, or superseding active decisions should only happen after explicit user approval; the application layer records those decisions but should not infer that approval from routine finish summaries.
 
 ### Infrastructure Interfaces
 

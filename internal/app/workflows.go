@@ -13,6 +13,169 @@ import (
 
 const statsScanLimit = 1000
 
+type PrepareChangeInput struct {
+	RepoPath    string `json:"repo_path"`
+	DisplayName string `json:"display_name,omitempty"`
+	Task        string `json:"task"`
+	Plan        string `json:"plan,omitempty"`
+	Limit       int    `json:"limit,omitempty"`
+}
+
+type PrepareChangeOutput struct {
+	Workspace            domain.Workspace  `json:"workspace"`
+	Context              ContextOutput     `json:"context"`
+	RecentDecisions      []domain.Decision `json:"recent_decisions"`
+	OpenConflicts        []domain.Conflict `json:"open_conflicts"`
+	Lookup               LookupOutput      `json:"lookup"`
+	Preflight            *PreflightOutput  `json:"preflight,omitempty"`
+	Verdict              string            `json:"verdict"`
+	ShouldEdit           bool              `json:"should_edit"`
+	RequiresUserApproval bool              `json:"requires_user_approval"`
+	NextActions          []string          `json:"next_actions"`
+}
+
+type FinishChangeInput struct {
+	WorkspaceID  string               `json:"workspace_id"`
+	Summary      string               `json:"summary"`
+	ChangedFiles []ChangedFileSummary `json:"changed_files,omitempty"`
+	Tests        []TestSummary        `json:"tests,omitempty"`
+	Decision     *RememberInput       `json:"decision,omitempty"`
+}
+
+type ChangedFileSummary struct {
+	Path    string `json:"path"`
+	Summary string `json:"summary,omitempty"`
+}
+
+type TestSummary struct {
+	Command string `json:"command"`
+	Status  string `json:"status,omitempty"`
+	Output  string `json:"output,omitempty"`
+}
+
+type FinishChangeOutput struct {
+	Status          string               `json:"status"`
+	Reason          string               `json:"reason,omitempty"`
+	Summary         string               `json:"summary"`
+	ChangedFiles    []ChangedFileSummary `json:"changed_files,omitempty"`
+	Tests           []TestSummary        `json:"tests,omitempty"`
+	Decision        *domain.Decision     `json:"decision,omitempty"`
+	IndexingStatus  string               `json:"indexing_status,omitempty"`
+	IndexingError   string               `json:"indexing_error,omitempty"`
+	QualityWarnings []string             `json:"quality_warnings,omitempty"`
+}
+
+func (s *Service) PrepareChange(ctx context.Context, in PrepareChangeInput) (PrepareChangeOutput, error) {
+	task := strings.TrimSpace(in.Task)
+	if task == "" {
+		return PrepareChangeOutput{}, errors.New("task is required")
+	}
+	attached, err := s.Attach(ctx, AttachInput{RepoPath: in.RepoPath, DisplayName: in.DisplayName})
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	workspaceID := attached.Workspace.ID
+	limit := boundedLimit(in.Limit, defaultLimit)
+	briefing, err := s.Context(ctx, ContextInput{WorkspaceID: workspaceID, Limit: limit})
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	recent, err := s.Recent(ctx, workspaceID, limit)
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	openConflicts, err := s.Conflicts(ctx, workspaceID)
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	lookup, err := s.Lookup(ctx, LookupInput{WorkspaceID: workspaceID, Query: task, Limit: limit})
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	out := PrepareChangeOutput{
+		Workspace:       attached.Workspace,
+		Context:         briefing,
+		RecentDecisions: recent,
+		OpenConflicts:   openConflicts,
+		Lookup:          lookup,
+		Verdict:         "needs_plan",
+		ShouldEdit:      false,
+		NextActions: []string{
+			"Draft a concrete implementation plan, then call tuskbase_prepare_change again with plan before editing.",
+			"Do not edit files until prepare_change returns should_edit=true.",
+		},
+	}
+	plan := strings.TrimSpace(in.Plan)
+	if plan == "" {
+		return out, nil
+	}
+	preflight, err := s.Preflight(ctx, PreflightInput{WorkspaceID: workspaceID, Proposal: plan, Limit: limit})
+	if err != nil {
+		return PrepareChangeOutput{}, err
+	}
+	out.Preflight = &preflight
+	if len(preflight.Conflicts) > 0 {
+		out.Verdict = "conflict"
+		out.ShouldEdit = false
+		out.RequiresUserApproval = true
+		out.NextActions = []string{
+			"Stop before editing. Ask the user to approve a changed plan, conflict resolution, or reconciliation.",
+			"Only call tuskbase_resolve_conflict or tuskbase_reconcile after explicit user approval.",
+		}
+		return out, nil
+	}
+	out.Verdict = "proceed"
+	out.ShouldEdit = true
+	out.NextActions = []string{
+		"Proceed with the planned edits.",
+		"After verification, call tuskbase_finish_change and include a durable decision only if one was actually made.",
+	}
+	if len(openConflicts) > 0 {
+		out.NextActions = append(out.NextActions, "Existing open conflicts are included as context but are not a hard stop unless this plan conflicts.")
+	}
+	return out, nil
+}
+
+func (s *Service) FinishChange(ctx context.Context, in FinishChangeInput) (FinishChangeOutput, error) {
+	if err := RequireRead(ctx); err != nil {
+		return FinishChangeOutput{}, err
+	}
+	workspaceID := strings.TrimSpace(in.WorkspaceID)
+	if workspaceID == "" {
+		return FinishChangeOutput{}, errors.New("workspace_id is required")
+	}
+	if _, err := s.store.GetWorkspace(ctx, workspaceID); err != nil {
+		return FinishChangeOutput{}, err
+	}
+	out := FinishChangeOutput{
+		Summary:      strings.TrimSpace(in.Summary),
+		ChangedFiles: normalizeChangedFiles(in.ChangedFiles),
+		Tests:        normalizeTestSummaries(in.Tests),
+	}
+	if in.Decision == nil {
+		out.Status = "skipped"
+		out.Reason = "no durable decision supplied"
+		return out, nil
+	}
+	decisionInput := *in.Decision
+	decisionWorkspaceID := strings.TrimSpace(decisionInput.WorkspaceID)
+	if decisionWorkspaceID == "" {
+		decisionInput.WorkspaceID = workspaceID
+	} else if decisionWorkspaceID != workspaceID {
+		return FinishChangeOutput{}, errors.New("decision workspace_id does not match finish workspace_id")
+	}
+	remembered, err := s.Remember(ctx, decisionInput)
+	if err != nil {
+		return FinishChangeOutput{}, err
+	}
+	out.Status = "remembered"
+	out.Decision = &remembered.Decision
+	out.IndexingStatus = remembered.IndexingStatus
+	out.IndexingError = remembered.IndexingError
+	out.QualityWarnings = remembered.QualityWarnings
+	return out, nil
+}
+
 type CheckInput struct {
 	WorkspaceID string `json:"workspace_id"`
 	Proposal    string `json:"proposal"`
@@ -543,6 +706,34 @@ func boundedLimit(limit, fallback int) int {
 		limit = statsScanLimit
 	}
 	return limit
+}
+
+func normalizeChangedFiles(files []ChangedFileSummary) []ChangedFileSummary {
+	out := make([]ChangedFileSummary, 0, len(files))
+	for _, file := range files {
+		path := strings.TrimSpace(file.Path)
+		if path == "" {
+			continue
+		}
+		out = append(out, ChangedFileSummary{Path: path, Summary: strings.TrimSpace(file.Summary)})
+	}
+	return out
+}
+
+func normalizeTestSummaries(tests []TestSummary) []TestSummary {
+	out := make([]TestSummary, 0, len(tests))
+	for _, test := range tests {
+		command := strings.TrimSpace(test.Command)
+		if command == "" {
+			continue
+		}
+		out = append(out, TestSummary{
+			Command: command,
+			Status:  strings.TrimSpace(test.Status),
+			Output:  strings.TrimSpace(test.Output),
+		})
+	}
+	return out
 }
 
 func trailHealth(out StatsOutput) float64 {

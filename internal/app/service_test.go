@@ -335,6 +335,164 @@ func TestContextReturnsCompactWorkspaceBriefing(t *testing.T) {
 	}
 }
 
+func TestPrepareChangeNeedsPlan(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	repo := newRepo(t)
+
+	out, err := service.PrepareChange(ctx, app.PrepareChangeInput{
+		RepoPath: repo,
+		Task:     "Update architecture documentation.",
+	})
+	if err != nil {
+		t.Fatalf("PrepareChange() error = %v", err)
+	}
+	if out.Workspace.ID == "" || out.Context.Workspace.ID != out.Workspace.ID {
+		t.Fatalf("workspace/context mismatch: %+v %+v", out.Workspace, out.Context.Workspace)
+	}
+	if out.Lookup.Receipt.Query != "Update architecture documentation." {
+		t.Fatalf("lookup query = %q", out.Lookup.Receipt.Query)
+	}
+	if out.Verdict != "needs_plan" || out.ShouldEdit || out.RequiresUserApproval {
+		t.Fatalf("prepare verdict = %q should_edit=%v requires_user_approval=%v", out.Verdict, out.ShouldEdit, out.RequiresUserApproval)
+	}
+	if out.Preflight != nil {
+		t.Fatalf("preflight = %+v, want nil without plan", out.Preflight)
+	}
+}
+
+func TestPrepareChangeCleanPlanCanProceed(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+	rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Postgres for refresh tokens", "Use Postgres for refresh token storage.")
+
+	out, err := service.PrepareChange(ctx, app.PrepareChangeInput{
+		RepoPath: attached.Workspace.RepoRoot,
+		Task:     "Add password reset token storage.",
+		Plan:     "Use Postgres for password reset tokens too.",
+	})
+	if err != nil {
+		t.Fatalf("PrepareChange() error = %v", err)
+	}
+	if out.Verdict != "proceed" || !out.ShouldEdit || out.RequiresUserApproval {
+		t.Fatalf("prepare verdict = %q should_edit=%v requires_user_approval=%v", out.Verdict, out.ShouldEdit, out.RequiresUserApproval)
+	}
+	if out.Preflight == nil {
+		t.Fatal("preflight = nil, want result for planned change")
+	}
+	if len(out.Preflight.Conflicts) != 0 {
+		t.Fatalf("preflight conflicts = %+v, want none", out.Preflight.Conflicts)
+	}
+	if len(out.Preflight.Relationships) == 0 {
+		t.Fatal("preflight relationships = 0, want related decision")
+	}
+}
+
+func TestPrepareChangeConflictHardStops(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+	rememberDecision(t, ctx, service, attached.Workspace.ID, "Use Redis for reset tokens", "Use Redis for password reset token storage.")
+
+	out, err := service.PrepareChange(ctx, app.PrepareChangeInput{
+		RepoPath: attached.Workspace.RepoRoot,
+		Task:     "Change reset token storage.",
+		Plan:     "Avoid Redis for password reset tokens and store them elsewhere.",
+	})
+	if err != nil {
+		t.Fatalf("PrepareChange() error = %v", err)
+	}
+	if out.Verdict != "conflict" || out.ShouldEdit || !out.RequiresUserApproval {
+		t.Fatalf("prepare verdict = %q should_edit=%v requires_user_approval=%v", out.Verdict, out.ShouldEdit, out.RequiresUserApproval)
+	}
+	if out.Preflight == nil || len(out.Preflight.Conflicts) == 0 {
+		t.Fatalf("preflight conflicts = %+v, want conflict", out.Preflight)
+	}
+	if !containsAction(out.NextActions, "Stop before editing") {
+		t.Fatalf("next actions missing hard stop: %+v", out.NextActions)
+	}
+}
+
+func TestFinishChangeSkipsWithoutDecision(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	out, err := service.FinishChange(ctx, app.FinishChangeInput{
+		WorkspaceID: attached.Workspace.ID,
+		Summary:     "Updated routine formatting.",
+		ChangedFiles: []app.ChangedFileSummary{
+			{Path: " README.md ", Summary: " Documented workflow. "},
+			{Summary: "ignored missing path"},
+		},
+		Tests: []app.TestSummary{
+			{Command: " go test ./internal/app ", Status: " passed "},
+			{Status: "ignored missing command"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("FinishChange() error = %v", err)
+	}
+	if out.Status != "skipped" || out.Reason != "no durable decision supplied" || out.Decision != nil {
+		t.Fatalf("finish output = %+v", out)
+	}
+	if len(out.ChangedFiles) != 1 || out.ChangedFiles[0].Path != "README.md" {
+		t.Fatalf("changed files = %+v", out.ChangedFiles)
+	}
+	if len(out.Tests) != 1 || out.Tests[0].Command != "go test ./internal/app" {
+		t.Fatalf("tests = %+v", out.Tests)
+	}
+	recent, err := service.Recent(ctx, attached.Workspace.ID, 10)
+	if err != nil {
+		t.Fatalf("Recent() error = %v", err)
+	}
+	if len(recent) != 0 {
+		t.Fatalf("FinishChange() without decision stored memory: %+v", recent)
+	}
+}
+
+func TestFinishChangeWithDecisionRemembers(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	attached := attachRepo(t, ctx, service)
+
+	out, err := service.FinishChange(ctx, app.FinishChangeInput{
+		WorkspaceID: attached.Workspace.ID,
+		Summary:     "Added automatic workflow tools.",
+		Decision: &app.RememberInput{
+			Actor:      domain.Actor{Kind: domain.ActorAgent},
+			Type:       "architecture",
+			Title:      "Use high-level agent workflow tools",
+			Outcome:    "Agents should prepare before edits and finish after verification through high-level Tuskbase tools.",
+			Rationale:  "The workflow tools compose attach, context, lookup, preflight, and remember so compliant MCP clients can use the decision trail automatically.",
+			Confidence: 0.86,
+			Evidence:   []domain.Evidence{{Kind: "test", Snippet: "FinishChange stores a supplied durable decision."}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("FinishChange() error = %v", err)
+	}
+	if out.Status != "remembered" || out.Decision == nil || out.Decision.WorkspaceID != attached.Workspace.ID {
+		t.Fatalf("finish output = %+v", out)
+	}
+	if out.IndexingStatus != "indexed" {
+		t.Fatalf("indexing status = %q", out.IndexingStatus)
+	}
+	recent, err := service.Recent(ctx, attached.Workspace.ID, 10)
+	if err != nil {
+		t.Fatalf("Recent() error = %v", err)
+	}
+	if !containsDecision(recent, out.Decision.ID) {
+		t.Fatalf("stored decision missing from recent: %+v", recent)
+	}
+}
+
 func containsDecision(decisions []domain.Decision, id string) bool {
 	for _, decision := range decisions {
 		if decision.ID == id {

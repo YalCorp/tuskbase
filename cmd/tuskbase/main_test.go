@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -53,6 +54,26 @@ func TestInitMCPDemoCodexCompatibility(t *testing.T) {
 	}
 }
 
+func TestConnectCodexPrintsMCPCommandAndWorkflow(t *testing.T) {
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"connect", "codex", "--mode", "local-basic"}, &out, &errb); err != nil {
+		t.Fatalf("execute(connect codex) error = %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"codex mcp add tuskbase -- tuskbase bridge --client codex",
+		"# Agent workflow instructions",
+		"tuskbase_prepare_change before editing",
+		"should_edit=false",
+		"tuskbase_finish_change after verification",
+		"durable repo decisions",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("connect output missing %q: %s", want, got)
+		}
+	}
+}
+
 func TestConnectClaudeLocalBasic(t *testing.T) {
 	var out, errb bytes.Buffer
 	if err := execute(context.Background(), []string{"connect", "claude", "--mode", "local-basic"}, &out, &errb); err != nil {
@@ -65,6 +86,9 @@ func TestConnectClaudeLocalBasic(t *testing.T) {
 	if strings.Contains(got, "TUSKBASE_API_KEY") || strings.Contains(got, "Authorization: Bearer") {
 		t.Fatalf("bridge output leaked HTTP auth setup = %q", got)
 	}
+	if !strings.Contains(got, "# Agent workflow instructions") {
+		t.Fatalf("connect output missing workflow instructions = %q", got)
+	}
 }
 
 func TestConnectCodexHTTPTransportRemainsAvailable(t *testing.T) {
@@ -75,6 +99,40 @@ func TestConnectCodexHTTPTransportRemainsAvailable(t *testing.T) {
 	got := out.String()
 	if !strings.Contains(got, "--bearer-token-env-var TUSKBASE_API_KEY") {
 		t.Fatalf("HTTP transport output = %q", got)
+	}
+}
+
+func TestConnectCodexApplyOnlyAppliesMCPConfigAndPrintsWorkflow(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fake shell executable is Unix-specific")
+	}
+	root := t.TempDir()
+	fakeCodex := filepath.Join(root, "codex")
+	argsPath := filepath.Join(root, "codex-args.txt")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$CODEX_ARGS_FILE\"\n"
+	if err := os.WriteFile(fakeCodex, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake codex: %v", err)
+	}
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("CODEX_ARGS_FILE", argsPath)
+
+	var out, errb bytes.Buffer
+	if err := execute(context.Background(), []string{"connect", "codex", "--mode", "local-basic", "--apply"}, &out, &errb); err != nil {
+		t.Fatalf("execute(connect codex --apply) error = %v stderr=%s", err, errb.String())
+	}
+	data, err := os.ReadFile(argsPath)
+	if err != nil {
+		t.Fatalf("read fake codex args: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "mcp add tuskbase -- tuskbase bridge --client codex" {
+		t.Fatalf("codex args = %q", got)
+	}
+	got := out.String()
+	if !strings.Contains(got, "apply: codex ok") || !strings.Contains(got, "# Agent workflow instructions") {
+		t.Fatalf("apply output = %q", got)
+	}
+	if strings.Contains(got, "AGENTS.md") || strings.Contains(got, "instructions file") {
+		t.Fatalf("apply output suggests global instruction rewrite: %q", got)
 	}
 }
 

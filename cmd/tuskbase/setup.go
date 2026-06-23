@@ -331,8 +331,11 @@ func runConnect(args []string, stdout, stderr io.Writer) error {
 	}
 	printConnectConfig(stdout, client, cfg, selectedTransport, *reveal)
 	if *apply {
-		return applyConnectConfig(client, cfg, selectedTransport, stdout, stderr)
+		if err := applyConnectConfig(client, cfg, selectedTransport, stdout, stderr); err != nil {
+			return err
+		}
 	}
+	printAgentWorkflowInstructions(stdout)
 	return nil
 }
 
@@ -714,6 +717,19 @@ func printHTTPConnectConfig(w io.Writer, client string, cfg userConfig, reveal b
 		fmt.Fprintf(w, "# Generic HTTP MCP config\n")
 		fmt.Fprintf(w, "url: %s\nAuthorization: Bearer %s\n", url, token)
 	}
+}
+
+func printAgentWorkflowInstructions(w io.Writer) {
+	p := newPresenter(w)
+	if p.pretty {
+		p.Section("Agent workflow instructions")
+		p.Hint("Compliant agents should use the high-level workflow tools automatically.")
+	}
+	fmt.Fprintln(w, "# Agent workflow instructions")
+	fmt.Fprintln(w, "- Call tuskbase_prepare_change before editing.")
+	fmt.Fprintln(w, "- Do not edit when should_edit=false; ask the user how to proceed.")
+	fmt.Fprintln(w, "- Call tuskbase_finish_change after verification.")
+	fmt.Fprintln(w, "- Remember only durable repo decisions, not routine summaries or chat logs.")
 }
 
 func bridgeClientName(cfg userConfig, client string) string {

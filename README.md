@@ -29,6 +29,8 @@ Tuskbase makes that kind of drift explicit:
 | `preflight` | Does my plan follow or fight prior direction? | Follows, extends, duplicates, supersedes, or conflicts. |
 | `remember` | What did we decide after the work? | Durable decision record with rationale and evidence. |
 
+For MCP-connected coding agents, the preferred path is higher level: agents call `tuskbase_prepare_change` before editing and `tuskbase_finish_change` after verification. The primitive loop remains available for manual use and custom clients.
+
 ## What Works Today
 
 Tuskbase is in its first implementation slice. The current product surface is usable locally, with clear deferred areas.
@@ -36,7 +38,7 @@ Tuskbase is in its first implementation slice. The current product surface is us
 Implemented now:
 
 - Go CLI for setup, diagnostics, daemon lifecycle, and local key management.
-- MCP tools for `attach`, `context`, `lookup`, `check`, `preflight`, `remember`, `assess`, structured decision query, conflict resolution, reconciliation, stats, recent decisions, and active conflicts.
+- MCP tools for automatic prepare/finish workflow plus `attach`, `context`, `lookup`, `check`, `preflight`, `remember`, `assess`, structured decision query, conflict resolution, reconciliation, stats, recent decisions, and active conflicts.
 - Demo stdio MCP mode for quick local experiments.
 - Local Basic daemon mode with SQLite, loopback HTTP MCP, and stdio bridge auth.
 - Local Shared mode with Postgres selected from Docker-managed pgvector Postgres or an existing pgvector-enabled Postgres DSN.
@@ -81,6 +83,8 @@ tuskbase status
 ```
 
 The default MCP client config uses `tuskbase bridge`, so Codex, Claude, Cursor, and other local clients do not need `TUSKBASE_API_KEY` exported in every shell.
+
+After setup, work normally in your coding agent. Compliant MCP-connected agents should automatically prepare before editing, stop when Tuskbase returns `should_edit=false`, verify their work, and finish with a durable decision only when the work created or changed a repo decision. Routine summaries and chat logs should not be remembered.
 
 Print client-specific setup commands:
 
@@ -174,6 +178,8 @@ For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. Lo
 
 | Tool | Purpose |
 |---|---|
+| `tuskbase_prepare_change` | Preferred pre-edit workflow: attach the repo, load context, recent decisions, open conflicts, task lookup, and plan preflight when a plan is supplied. Returns `should_edit=false` for conflicts. |
+| `tuskbase_finish_change` | Preferred post-work workflow: report summary, changed files, tests, and optionally remember a durable decision. Skips memory writes when no decision is supplied. |
 | `tuskbase_attach` | Attach or refresh repo workspace context. |
 | `tuskbase_context` | Return a compact workspace briefing with docs, active decisions, open conflicts, recent supersessions, degraded states, and recommended next actions. |
 | `tuskbase_lookup` | Retrieve relevant active decisions, claims, evidence, and docs before editing, with a lookup receipt. |
@@ -187,6 +193,8 @@ For Docker-managed Local Shared, Docker/Postgres is a runtime dependency too. Lo
 | `tuskbase_stats` | Return aggregate trail-health stats for decisions, conflicts, assessments, and completeness. |
 | `tuskbase_recent` | Show recent active decisions for a workspace. |
 | `tuskbase_conflicts` | Show active conflicts for a workspace. |
+
+Conflict resolution and superseding prior decisions require explicit user approval. A preflight conflict is a hard stop for editing until the user approves a changed plan, a resolution, or a reconciliation decision.
 
 ### Optional REST API
 

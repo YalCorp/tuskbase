@@ -24,8 +24,24 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 	server := mcp.NewServer(&mcp.Implementation{Name: "tuskbase", Version: version}, nil)
 
 	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_prepare_change",
+		Description: "Preferred automatic pre-edit workflow for coding agents. Call before editing: attaches the repo, loads context/recent/conflicts, runs lookup, and preflights a supplied plan. If should_edit=false, stop and ask the user before file edits.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.PrepareChangeInput) (*mcp.CallToolResult, app.PrepareChangeOutput, error) {
+		out, err := service.PrepareChange(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_finish_change",
+		Description: "Preferred conservative post-work workflow for coding agents. Call after verification with summary, changed files, tests, and only a durable decision if one was actually made; routine summaries are skipped and not auto-remembered.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.FinishChangeInput) (*mcp.CallToolResult, app.FinishChangeOutput, error) {
+		out, err := service.FinishChange(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_attach",
-		Description: "Attach or refresh a local repo workspace.",
+		Description: "Low-level primitive to attach or refresh a local repo workspace. Coding agents should usually call tuskbase_prepare_change before edits instead.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.AttachInput) (*mcp.CallToolResult, app.AttachOutput, error) {
 		out, err := service.Attach(ctx, in)
 		return nil, out, err
@@ -33,7 +49,7 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_context",
-		Description: "Start here for a compact workspace briefing: attached repo docs, recent active decisions, open conflicts, recent supersessions, degraded states, and recommended next actions.",
+		Description: "Low-level compact workspace briefing with docs, recent active decisions, open conflicts, supersessions, degraded states, and next actions. Coding agents should usually call tuskbase_prepare_change before edits.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.ContextInput) (*mcp.CallToolResult, app.ContextOutput, error) {
 		out, err := service.Context(ctx, in)
 		return nil, out, err
@@ -41,7 +57,7 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_remember",
-		Description: "After work completes, store durable decisions only: include outcome, rationale, evidence, alternatives, claims, and relationships such as supersedes_id; skip chat logs, transient status, and unchosen plans.",
+		Description: "Low-level durable-decision write. Prefer tuskbase_finish_change after verification; store durable decisions only with outcome, rationale, evidence, alternatives, claims, and relationships such as supersedes_id; skip chat logs, transient status, and unchosen plans.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.RememberInput) (*mcp.CallToolResult, app.RememberOutput, error) {
 		out, err := service.Remember(ctx, in)
 		return nil, out, err
@@ -49,7 +65,7 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_lookup",
-		Description: "Use for task-specific repo memory before editing or explaining a choice. Skip for purely mechanical work or when tuskbase_context shows no recorded memory. Cite receipt.id and relevant result ids when reporting context used.",
+		Description: "Low-level task-specific repo memory lookup. Coding agents should usually call tuskbase_prepare_change before editing; cite receipt.id and relevant result ids when reporting context used.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.LookupInput) (*mcp.CallToolResult, app.LookupOutput, error) {
 		out, err := service.Lookup(ctx, in)
 		return nil, out, err
@@ -57,7 +73,7 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_check",
-		Description: "Run a non-mutating proposal check against active decisions. Use before preflight when you want relationship evidence without recording a lookup receipt or opening conflicts.",
+		Description: "Low-level non-mutating proposal check against active decisions. Use tuskbase_prepare_change for the normal automatic pre-edit workflow; use this when you want relationship evidence without recording a lookup receipt or opening conflicts.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.CheckInput) (*mcp.CallToolResult, app.CheckOutput, error) {
 		out, err := service.Check(ctx, in)
 		return nil, out, err
@@ -73,7 +89,7 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "tuskbase_preflight",
-		Description: "Use before meaningful implementation plans, especially architecture, security, data, setup, or behavior changes. Report whether the proposal follows, extends, duplicates, supersedes, or conflicts with active decisions.",
+		Description: "Low-level preflight for meaningful implementation plans. Prefer tuskbase_prepare_change before edits. Reports whether the proposal follows, extends, duplicates, supersedes, or conflicts with active decisions; conflicts require stopping before file edits and getting user approval.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.PreflightInput) (*mcp.CallToolResult, app.PreflightOutput, error) {
 		out, err := service.Preflight(ctx, in)
 		return nil, out, err
