@@ -362,9 +362,26 @@ func normalizedDaemonConfig(cfg userConfig) userConfig {
 }
 
 func printLifecycleResult(w io.Writer, label string, result lifecycleResult) {
+	p := newPresenter(w)
 	state := result.State
 	if state == "" {
 		state = "unknown"
+	}
+	if p.pretty {
+		p.KV(label, state)
+		if result.Backend != "" {
+			p.KV(label+"_backend", result.Backend)
+		}
+		if result.Detail != "" {
+			p.KV(label+"_detail", result.Detail)
+		}
+		if result.Err != nil {
+			p.KV(label+"_error", result.Err.Error())
+		}
+		if result.LogPath != "" {
+			p.KV(label+"_log", result.LogPath)
+		}
+		return
 	}
 	fmt.Fprintf(w, "%s: %s", label, state)
 	if result.Backend != "" {
@@ -383,6 +400,37 @@ func printLifecycleResult(w io.Writer, label string, result lifecycleResult) {
 }
 
 func printLifecycleStatus(w io.Writer, status lifecycleStatus) {
+	p := newPresenter(w)
+	if p.pretty {
+		p.Header()
+		p.Section("Service")
+		if status.Health != nil {
+			p.KV("daemon", "ready")
+			p.KV("health", statusLabel(status.Health.Status))
+			p.KV("mcp", boolStatus(status.Health.MCP))
+			p.KV("rest", boolStatus(status.Health.REST))
+		} else {
+			p.KV("daemon", "down")
+			if status.HealthError != nil {
+				p.KV("health_error", status.HealthError.Error())
+			}
+		}
+		p.KV("service_backend", status.Backend)
+		p.KV("service_state", emptyDefault(status.State, "unknown"))
+		p.KV("service_autostart", emptyDefault(status.Autostart, "unknown"))
+		if status.Detail != "" {
+			p.KV("service_detail", status.Detail)
+		}
+		if status.LogPath != "" {
+			p.KV("log_path", status.LogPath)
+		}
+		if status.Health != nil {
+			p.Section("Auth")
+			p.KV("auth_policy", status.Health.AuthPolicy)
+			p.KV("auth_source", status.Health.AuthSource)
+		}
+		return
+	}
 	if status.Health != nil {
 		fmt.Fprintf(w, "daemon: running\n")
 		fmt.Fprintf(w, "health: %s\n", status.Health.Status)
@@ -405,6 +453,13 @@ func printLifecycleStatus(w io.Writer, status lifecycleStatus) {
 	if status.LogPath != "" {
 		fmt.Fprintf(w, "log_path: %s\n", status.LogPath)
 	}
+}
+
+func boolStatus(value bool) string {
+	if value {
+		return "ready"
+	}
+	return "disabled"
 }
 
 func emptyDefault(value, fallback string) string {

@@ -174,52 +174,78 @@ func runSetup(args []string, stdout, stderr io.Writer) error {
 		cfg.APIKey = ""
 	}
 
-	fmt.Fprintf(stdout, "Tuskbase setup\n")
-	fmt.Fprintf(stdout, "mode: %s\n", cfg.Mode)
-	fmt.Fprintf(stdout, "addr: %s\n", cfg.Addr)
+	p := newPresenter(stdout)
+	if p.pretty {
+		p.Header()
+		p.Section("Setup")
+	} else {
+		fmt.Fprintf(stdout, "Tuskbase setup\n")
+	}
+	p.KV("mode", cfg.Mode)
+	p.KV("addr", cfg.Addr)
+	if p.pretty {
+		p.Section("Store")
+	}
 	printStoreSummary(stdout, cfg)
 	printSetupStoreResult(stdout, storeResult)
-	fmt.Fprintf(stdout, "config: %s\n", path)
+	if p.pretty {
+		p.Section("Runtime")
+	}
+	p.KV("config", path)
 	if found {
-		fmt.Fprintf(stdout, "existing config: reused\n")
+		p.KV("existing config", "reused")
 	}
 	if *printOnly {
-		fmt.Fprintf(stdout, "write: skipped (--print-only)\n")
+		p.KV("write", "skipped (--print-only)")
 	} else if err := saveUserConfig(path, cfg); err != nil {
 		return err
 	} else {
-		fmt.Fprintf(stdout, "write: ok\n")
+		p.KV("write", "ok")
 	}
 	if cfg.Mode != modeDemo {
 		switch {
 		case *printOnly && generatedSecret:
-			fmt.Fprintf(stdout, "secret: generated for preview; not stored\n")
+			p.KV("secret", "generated for preview; not stored")
 		case *printOnly:
-			fmt.Fprintf(stdout, "secret: reused from existing config; not shown\n")
+			p.KV("secret", "reused from existing config; not shown")
 		case generatedSecret:
-			fmt.Fprintf(stdout, "secret: generated and stored locally\n")
+			p.KV("secret", "generated and stored locally")
 		default:
-			fmt.Fprintf(stdout, "secret: reused from existing config\n")
+			p.KV("secret", "reused from existing config")
 		}
 	}
+	if p.pretty {
+		p.Section("Service")
+	}
 	if cfg.Mode == modeDemo {
-		fmt.Fprintf(stdout, "service: skipped (demo mode)\n")
+		p.KV("service", "skipped (demo mode)")
 	} else if *printOnly {
-		fmt.Fprintf(stdout, "service: skipped (--print-only)\n")
+		p.KV("service", "skipped (--print-only)")
 	} else if cfg.Mode == modeLocalShared && !hasPostgresDSN(cfg) {
-		fmt.Fprintf(stdout, "service: skipped (postgres dsn required for local-shared)\n")
+		p.KV("service", "skipped (postgres dsn required for local-shared)")
 	} else if cfg.daemonAutostartEnabled() {
 		result := newLifecycleController().InstallAndStart(context.Background(), cfg)
 		printLifecycleResult(stdout, "service", result)
 	} else {
-		fmt.Fprintf(stdout, "service: autostart disabled\n")
+		p.KV("service", "autostart disabled")
 	}
 	if *reveal {
+		if p.pretty {
+			p.Section("Auth")
+		}
 		printSecrets(stdout, cfg)
+	}
+	if len(selectedClients) == 0 && p.pretty {
+		p.Section("Next")
+		p.Hint("Run `tuskbase connect codex` to print MCP client setup.")
 	}
 	for _, client := range selectedClients {
 		fmt.Fprintln(stdout)
-		printConnectConfig(stdout, client, cfg, selectedTransport, *reveal)
+		if p.pretty {
+			p.Section("Connect")
+			p.Hint("Exact MCP config command for %s.", client)
+		}
+		printConnectConfigBody(stdout, client, cfg, selectedTransport, *reveal, false)
 		if *apply {
 			if err := applyConnectConfig(client, cfg, selectedTransport, stdout, stderr); err != nil {
 				return err
@@ -243,20 +269,21 @@ func printSetupStoreResult(w io.Writer, result setupStoreResult) {
 	if result.DockerPostgres == nil {
 		return
 	}
+	p := newPresenter(w)
 	detail := strings.TrimSpace(result.DockerPostgres.Detail)
 	switch {
 	case result.DockerPostgres.Skipped:
 		if detail == "" {
 			detail = "skipped"
 		}
-		fmt.Fprintf(w, "docker_postgres: %s\n", detail)
+		p.KV("docker_postgres", detail)
 	case result.DockerPostgres.Ready:
-		fmt.Fprintf(w, "docker_postgres: ready\n")
+		p.KV("docker_postgres", "ready")
 	default:
 		if detail == "" {
 			detail = "configured"
 		}
-		fmt.Fprintf(w, "docker_postgres: %s\n", detail)
+		p.KV("docker_postgres", detail)
 	}
 }
 
@@ -592,6 +619,11 @@ func canonicalClient(client string) (string, error) {
 }
 
 func printConnectConfig(w io.Writer, client string, cfg userConfig, transport string, reveal bool) {
+	printConnectConfigBody(w, client, cfg, transport, reveal, true)
+}
+
+func printConnectConfigBody(w io.Writer, client string, cfg userConfig, transport string, reveal bool, showHeader bool) {
+	p := newPresenter(w)
 	client, err := canonicalClient(client)
 	if err != nil {
 		fmt.Fprintf(w, "%s\n", err)
@@ -603,16 +635,31 @@ func printConnectConfig(w io.Writer, client string, cfg userConfig, transport st
 		return
 	}
 	if cfg.Mode == modeDemo {
+		if p.pretty && showHeader {
+			p.Header()
+			p.Section("Connect")
+			p.Hint("Demo mode runs a direct stdio MCP server.")
+		}
 		printStdioConfig(w, client, []string{"serve"})
 		return
 	}
 	if transport == transportBridge {
+		if p.pretty && showHeader {
+			p.Header()
+			p.Section("Connect")
+			p.Hint("Bridge transport keeps bearer tokens in Tuskbase-owned local config.")
+		}
 		if cfg.Mode != modeDemo {
 			fmt.Fprintf(w, "# Tuskbase bridge keeps bearer tokens in Tuskbase-owned local config.\n")
 		}
 		bridgeClient := bridgeClientName(cfg, client)
 		printStdioConfig(w, client, []string{"bridge", "--client", bridgeClient})
 		return
+	}
+	if p.pretty && showHeader {
+		p.Header()
+		p.Section("Connect")
+		p.Hint("HTTP transport uses an MCP URL plus bearer-token auth.")
 	}
 	printHTTPConnectConfig(w, client, cfg, reveal)
 }
@@ -719,22 +766,41 @@ func tokenForClient(cfg userConfig, client string, reveal bool) string {
 }
 
 func printAuthSummary(w io.Writer, cfg userConfig, reveal bool) {
-	fmt.Fprintf(w, "mode: %s\n", cfg.Mode)
-	fmt.Fprintf(w, "auth_policy: %s\n", authPolicyName(cfg))
+	p := newPresenter(w)
+	if p.pretty {
+		p.Header()
+		p.Section("Auth")
+	}
+	p.KV("mode", cfg.Mode)
+	p.KV("auth_policy", authPolicyName(cfg))
 	if cfg.Mode != modeDemo {
-		fmt.Fprintf(w, "auth_source: config\n")
+		p.KV("auth_source", "config")
 	}
 	switch cfg.Mode {
 	case modeLocalBasic:
-		fmt.Fprintf(w, "local-api-key role=agent key=%s\n", secretForPrint(cfg.APIKey, reveal))
+		if p.pretty {
+			p.Section("Keys")
+			fmt.Fprintf(w, "  %-16s %-8s %s\n", "name", "role", "key")
+			fmt.Fprintf(w, "  %-16s %-8s %s\n", "local-api-key", "agent", secretForPrint(cfg.APIKey, reveal))
+		} else {
+			fmt.Fprintf(w, "local-api-key role=agent key=%s\n", secretForPrint(cfg.APIKey, reveal))
+		}
 	case modeLocalShared:
 		keys := append([]daemon.LocalSharedKey(nil), cfg.AgentKeys...)
 		sortAgentKeys(keys)
+		if p.pretty {
+			p.Section("Keys")
+			fmt.Fprintf(w, "  %-16s %-8s %s\n", "name", "role", "key")
+		}
 		for _, key := range keys {
-			fmt.Fprintf(w, "%s role=%s key=%s\n", key.Name, key.Role, secretForPrint(key.Key, reveal))
+			if p.pretty {
+				fmt.Fprintf(w, "  %-16s %-8s %s\n", key.Name, key.Role, secretForPrint(key.Key, reveal))
+			} else {
+				fmt.Fprintf(w, "%s role=%s key=%s\n", key.Name, key.Role, secretForPrint(key.Key, reveal))
+			}
 		}
 	default:
-		fmt.Fprintf(w, "secret: none\n")
+		p.KV("secret", "none")
 	}
 }
 

@@ -302,6 +302,7 @@ func secretStatus(value string) string {
 }
 
 func printStoreSummary(w io.Writer, cfg userConfig) {
+	p := newPresenter(w)
 	switch cfg.Store.Type {
 	case storePostgres:
 		driver := defaultPostgresDriver
@@ -312,28 +313,28 @@ func printStoreSummary(w io.Writer, cfg userConfig) {
 		if cfg.Store.Postgres != nil {
 			source = cfg.Store.Postgres.Source
 		}
-		fmt.Fprintf(w, "store: %s\n", storePostgres)
+		p.KV("store", storePostgres)
 		if strings.TrimSpace(source) != "" {
-			fmt.Fprintf(w, "postgres_source: %s\n", source)
+			p.KV("postgres_source", source)
 		}
-		fmt.Fprintf(w, "postgres_driver: %s\n", driver)
+		p.KV("postgres_driver", driver)
 		if hasPostgresDSN(cfg) {
-			fmt.Fprintf(w, "postgres_dsn: configured\n")
+			p.KV("postgres_dsn", "configured")
 		} else {
-			fmt.Fprintf(w, "postgres_dsn: missing (set TUSKBASE_POSTGRES_DSN or rerun setup with --postgres-dsn)\n")
+			p.KV("postgres_dsn", "missing (set TUSKBASE_POSTGRES_DSN or rerun setup with --postgres-dsn)")
 		}
 		if cfg.Store.Postgres != nil && cfg.Store.Postgres.Docker != nil {
 			docker := cfg.Store.Postgres.Docker
-			fmt.Fprintf(w, "docker_postgres_project: %s\n", docker.Project)
+			p.KV("docker_postgres_project", docker.Project)
 			if strings.TrimSpace(docker.Context) != "" {
-				fmt.Fprintf(w, "docker_context: %s\n", docker.Context)
+				p.KV("docker_context", docker.Context)
 			}
-			fmt.Fprintf(w, "docker_postgres_image: %s\n", docker.Image)
-			fmt.Fprintf(w, "docker_postgres_port: %d\n", docker.Port)
-			fmt.Fprintf(w, "docker_compose: %s\n", docker.ComposePath)
+			p.KV("docker_postgres_image", docker.Image)
+			p.KV("docker_postgres_port", fmt.Sprintf("%d", docker.Port))
+			p.KV("docker_compose", docker.ComposePath)
 		}
 	default:
-		fmt.Fprintf(w, "store: %s\n", storeSQLite)
-		fmt.Fprintf(w, "db_path: %s\n", cfg.DBPath)
+		p.KV("store", storeSQLite)
+		p.KV("db_path", cfg.DBPath)
 	}
 }

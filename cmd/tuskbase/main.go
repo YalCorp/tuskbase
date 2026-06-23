@@ -219,69 +219,89 @@ func runDoctor(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	incompleteLocalShared := cfg.Mode == modeLocalShared && strings.TrimSpace(store.PostgresDSN) == ""
 	authPolicy, authErr := loadAuthPolicy(cfg.Mode != modeDemo)
 	status := newLifecycleController().Status(ctx, cfg)
-	fmt.Fprintf(stdout, "tuskbase: ok\n")
-	fmt.Fprintf(stdout, "version: %s\n", version)
-	fmt.Fprintf(stdout, "store: %s\n", emptyDefault(store.Type, "unavailable"))
+	p := newPresenter(stdout)
+	if p.pretty {
+		p.Header()
+		p.Section("Health")
+	}
+	p.KV("tuskbase", "ok")
+	p.KV("version", version)
+	if p.pretty {
+		p.Section("Store")
+	}
+	p.KV("store", emptyDefault(store.Type, "unavailable"))
 	if incompleteLocalShared {
-		fmt.Fprintf(stdout, "setup_state: incomplete\n")
-		fmt.Fprintf(stdout, "repair_hint: Local Shared config is missing Postgres settings; older tuskbase binaries may have written auth-only Local Shared config. Update or reinstall tuskbase, then rerun `tuskbase setup --mode local-shared --yes`, or use `--postgres-source existing --postgres-dsn <dsn>`.\n")
+		p.KV("setup_state", "incomplete")
+		p.KV("repair_hint", "Local Shared config is missing Postgres settings; older tuskbase binaries may have written auth-only Local Shared config. Update or reinstall tuskbase, then rerun `tuskbase setup --mode local-shared --yes`, or use `--postgres-source existing --postgres-dsn <dsn>`.")
 	}
 	if store.Type == storeSQLite {
-		fmt.Fprintf(stdout, "db_path: %s\n", store.SQLitePath)
+		p.KV("db_path", store.SQLitePath)
 	}
 	if store.Type == storePostgres {
-		fmt.Fprintf(stdout, "postgres_driver: %s\n", store.PostgresDriver)
-		fmt.Fprintf(stdout, "postgres_dsn: %s\n", secretStatus(store.PostgresDSN))
+		p.KV("postgres_driver", store.PostgresDriver)
+		p.KV("postgres_dsn", secretStatus(store.PostgresDSN))
 		if cfg.Store.Postgres != nil && strings.TrimSpace(cfg.Store.Postgres.Source) != "" {
-			fmt.Fprintf(stdout, "postgres_source: %s\n", cfg.Store.Postgres.Source)
+			p.KV("postgres_source", cfg.Store.Postgres.Source)
 		}
 		if cfg.Store.Postgres != nil && cfg.Store.Postgres.Docker != nil {
 			docker := cfg.Store.Postgres.Docker
 			if strings.TrimSpace(docker.Context) != "" {
-				fmt.Fprintf(stdout, "docker_context: %s\n", docker.Context)
+				p.KV("docker_context", docker.Context)
 			}
-			fmt.Fprintf(stdout, "docker_postgres_image: %s\n", docker.Image)
-			fmt.Fprintf(stdout, "docker_postgres_port: %d\n", docker.Port)
+			p.KV("docker_postgres_image", docker.Image)
+			p.KV("docker_postgres_port", fmt.Sprintf("%d", docker.Port))
 		}
 		if storeCheck.Checked {
 			if storeCheck.Ready {
-				fmt.Fprintf(stdout, "store_runtime: ready\n")
-				fmt.Fprintf(stdout, "postgres_connect: ok\n")
+				p.KV("store_runtime", "ready")
+				p.KV("postgres_connect", "ok")
 			} else {
-				fmt.Fprintf(stdout, "store_runtime: not-ready\n")
-				fmt.Fprintf(stdout, "postgres_connect: %s\n", storeCheck.Status)
-				fmt.Fprintf(stdout, "postgres_error: %s\n", storeCheck.Error)
+				p.KV("store_runtime", "not-ready")
+				p.KV("postgres_connect", storeCheck.Status)
+				p.KV("postgres_error", storeCheck.Error)
 				if storeCheck.RepairHint != "" {
-					fmt.Fprintf(stdout, "repair_hint: %s\n", storeCheck.RepairHint)
+					p.KV("repair_hint", storeCheck.RepairHint)
 				}
 				if storeCheck.FallbackHint != "" {
-					fmt.Fprintf(stdout, "fallback_hint: %s\n", storeCheck.FallbackHint)
+					p.KV("fallback_hint", storeCheck.FallbackHint)
 				}
 			}
 		}
 	}
 	if storeErr != nil {
-		fmt.Fprintf(stdout, "store_error: %s\n", storeErr)
+		p.KV("store_error", storeErr.Error())
 	}
-	fmt.Fprintf(stdout, "addr: %s\n", cfg.Addr)
+	if p.pretty {
+		p.Section("Service")
+	}
+	p.KV("addr", cfg.Addr)
 	if status.Health != nil {
-		fmt.Fprintf(stdout, "mcp: ready\n")
+		p.KV("mcp", "ready")
 	} else {
-		fmt.Fprintf(stdout, "mcp: not-ready (%v)\n", status.HealthError)
+		p.KV("mcp", fmt.Sprintf("not-ready (%v)", status.HealthError))
+	}
+	if p.pretty {
+		p.Section("Auth")
 	}
 	if authErr != nil {
-		fmt.Fprintf(stdout, "auth_policy: unavailable\n")
-		fmt.Fprintf(stdout, "auth_error: %s\n", authErr)
+		p.KV("auth_policy", "unavailable")
+		p.KV("auth_error", authErr.Error())
 	} else {
-		fmt.Fprintf(stdout, "auth_policy: %s\n", authPolicy.Name())
-		fmt.Fprintf(stdout, "auth_source: %s\n", authPolicy.Source())
+		p.KV("auth_policy", authPolicy.Name())
+		p.KV("auth_source", authPolicy.Source())
 	}
-	fmt.Fprintf(stdout, "service_backend: %s\n", status.Backend)
-	fmt.Fprintf(stdout, "service_state: %s\n", emptyDefault(status.State, "unknown"))
-	fmt.Fprintf(stdout, "service_autostart: %s\n", emptyDefault(status.Autostart, "unknown"))
-	fmt.Fprintf(stdout, "log_path: %s\n", status.LogPath)
+	if p.pretty {
+		p.Section("Runtime")
+	}
+	p.KV("service_backend", status.Backend)
+	p.KV("service_state", emptyDefault(status.State, "unknown"))
+	p.KV("service_autostart", emptyDefault(status.Autostart, "unknown"))
+	p.KV("log_path", status.LogPath)
 	printEmbeddingDoctor(stdout)
-	fmt.Fprintf(stdout, "clients: codex, claude, cursor, generic (print with `tuskbase connect <client>`)\n")
+	if p.pretty {
+		p.Section("Next")
+	}
+	p.KV("clients", "codex, claude, cursor, generic (print with `tuskbase connect <client>`)")
 	return nil
 }
 
@@ -400,20 +420,21 @@ func storeFactoryForRuntime(cfg runtimeConfig, logger *slog.Logger) (daemon.Stor
 }
 
 func printEmbeddingDoctor(w io.Writer) {
+	p := newPresenter(w)
 	provider := strings.ToLower(strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_PROVIDER")))
 	switch provider {
 	case "", "none", "text":
-		fmt.Fprintf(w, "embeddings: disabled\n")
+		p.KV("embeddings", "disabled")
 	case "openai":
 		if strings.TrimSpace(os.Getenv("OPENAI_API_KEY")) == "" {
-			fmt.Fprintf(w, "embeddings: openai missing OPENAI_API_KEY\n")
+			p.KV("embeddings", "openai missing OPENAI_API_KEY")
 			return
 		}
 		model := strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_MODEL"))
 		if model == "" {
 			model = embeddings.DefaultOpenAIEmbeddingModel
 		}
-		fmt.Fprintf(w, "embeddings: openai model=%s\n", model)
+		p.KV("embeddings", "openai model="+model)
 	case "ollama":
 		model := strings.TrimSpace(os.Getenv("TUSKBASE_EMBEDDING_MODEL"))
 		if model == "" {
@@ -423,9 +444,9 @@ func printEmbeddingDoctor(w io.Writer) {
 		if strings.TrimSpace(baseURL) == "" {
 			baseURL = embeddings.DefaultOllamaBaseURL
 		}
-		fmt.Fprintf(w, "embeddings: ollama model=%s base_url=%s\n", model, baseURL)
+		p.KV("embeddings", fmt.Sprintf("ollama model=%s base_url=%s", model, baseURL))
 	default:
-		fmt.Fprintf(w, "embeddings: unknown provider %s\n", provider)
+		p.KV("embeddings", "unknown provider "+provider)
 	}
 }
 
@@ -558,10 +579,33 @@ func requireLoopback(addr string) error {
 }
 
 func printVersion(w io.Writer) {
+	p := newPresenter(w)
+	if p.pretty {
+		p.Header()
+		p.Section("Runtime")
+		p.KV("version", version)
+		p.KV("commit", commit)
+		p.KV("date", date)
+		p.KV("go", runtime.Version())
+		p.KV("platform", runtime.GOOS+"/"+runtime.GOARCH)
+		return
+	}
 	fmt.Fprintf(w, "tuskbase %s\ncommit: %s\ndate: %s\ngo: %s\nplatform: %s/%s\n", version, commit, date, runtime.Version(), runtime.GOOS, runtime.GOARCH)
 }
 
 func printInit(w io.Writer) {
+	p := newPresenter(w)
+	if p.pretty {
+		p.Header()
+		p.Section("Next")
+		p.Line("Run the guided setup:\n")
+		p.Line("  tuskbase setup\n")
+		p.Hint("Recommended first path: Local Basic.")
+		p.Section("Advanced")
+		p.Line("  tuskbase setup --mode demo")
+		p.Line("  tuskbase setup --mode local-shared")
+		return
+	}
 	fmt.Fprint(w, `Run the guided setup:
 
   tuskbase setup
@@ -576,6 +620,31 @@ Advanced paths:
 }
 
 func printUsage(w io.Writer) {
+	p := newPresenter(w)
+	if p.pretty {
+		p.Header()
+		p.Section("Setup")
+		p.Line("  setup             Set up Tuskbase and generate local auth")
+		p.Line("  connect [client]  Print MCP setup for codex, claude, cursor, or generic")
+		p.Line("  status            Check whether Tuskbase is running")
+		p.Line("  doctor            Check local setup")
+		p.Section("Service")
+		p.Line("  start             Start the local Tuskbase daemon")
+		p.Line("  bridge            Run stdio MCP bridge with Tuskbase-managed local auth")
+		p.Section("Auth")
+		p.Line("  auth list         Show local auth keys; use --reveal to print secrets")
+		p.Line("  auth rotate       Rotate Local Basic or Local Shared keys")
+		p.Line("  auth add/remove   Manage Local Shared named keys")
+		p.Section("Runtime")
+		p.Line("  version           Print version info")
+		p.Section("Advanced")
+		p.Line("  serve             Run stdio MCP directly")
+		p.Line("  serve --http-mcp  Run HTTP MCP directly")
+		p.Line("  daemon restart    Restart the user-scope daemon service")
+		p.Section("Next")
+		p.Hint("Start with `tuskbase setup`, then run `tuskbase connect codex`.")
+		return
+	}
 	fmt.Fprint(w, `Usage: tuskbase <command>
 
 Commands:
