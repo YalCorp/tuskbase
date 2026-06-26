@@ -106,4 +106,34 @@ func TestPostgresDecisionLifecycleContract(t *testing.T) {
 	if len(results) == 0 || results[0].EntityID != second.Decision.ID || results[0].Score <= 0 {
 		t.Fatalf("SearchVector() = %#v, want semantic match for second decision", results)
 	}
+	candidate := domain.DecisionCandidate{
+		ID:            "cand_postgres_contract",
+		WorkspaceID:   workspace.ID,
+		Type:          "architecture",
+		Title:         "Use source-backed imports",
+		Outcome:       "Imported decisions remain candidates until accepted.",
+		Rationale:     "Contract coverage for Local Shared.",
+		Confidence:    0.7,
+		SourcePath:    "README.md",
+		SourceSnippet: "We require source-backed imports.",
+		SourceHash:    "hash_postgres_contract",
+		Detector:      "rule:v1",
+		Status:        domain.CandidatePending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	inserted, err := store.UpsertDecisionCandidate(ctx, candidate)
+	if err != nil {
+		t.Fatalf("UpsertDecisionCandidate() error = %v", err)
+	}
+	if inserted.Status != domain.CandidatePending {
+		t.Fatalf("candidate status = %q, want pending", inserted.Status)
+	}
+	rejected, err := store.UpdateDecisionCandidateStatus(ctx, ports.DecisionCandidateStatusUpdate{ID: inserted.ID, WorkspaceID: workspace.ID, Status: domain.CandidateRejected, RejectionSummary: "contract", UpdatedAt: now})
+	if err != nil {
+		t.Fatalf("UpdateDecisionCandidateStatus() error = %v", err)
+	}
+	if rejected.Status != domain.CandidateRejected {
+		t.Fatalf("rejected status = %q", rejected.Status)
+	}
 }

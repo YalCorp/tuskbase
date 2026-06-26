@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/priyavratuniyal/tuskbase/internal/domain"
+	"github.com/priyavratuniyal/tuskbase/internal/ports"
 )
 
 func TestOpenCreatesSchema(t *testing.T) {
@@ -205,5 +206,98 @@ func TestSaveDecisionNormalizesChildrenAndSupersedes(t *testing.T) {
 	}
 	if alternatives != 1 || claims != 1 || evidence != 1 || relationships != 1 {
 		t.Fatalf("normalized counts alternatives=%d claims=%d evidence=%d relationships=%d", alternatives, claims, evidence, relationships)
+	}
+}
+
+func TestDecisionCandidateLifecycle(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "tuskbase.db"))
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	workspace := domain.Workspace{
+		ID:              "ws_candidates",
+		RepoRoot:        t.TempDir(),
+		DisplayName:     "candidates",
+		RepoFingerprint: "fingerprint",
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+	if _, err := store.UpsertWorkspace(ctx, workspace); err != nil {
+		t.Fatalf("UpsertWorkspace() error = %v", err)
+	}
+	candidate := domain.DecisionCandidate{
+		ID:            "cand_1",
+		WorkspaceID:   workspace.ID,
+		Type:          "architecture",
+		Title:         "Use SQLite locally",
+		Outcome:       "Use SQLite for local memory.",
+		Rationale:     "Source-backed import.",
+		Confidence:    0.7,
+		SourcePath:    "README.md",
+		SourceSnippet: "We use SQLite for local memory.",
+		SourceHash:    "hash_1",
+		Detector:      "rule:v1",
+		Status:        domain.CandidatePending,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+	inserted, err := store.UpsertDecisionCandidate(ctx, candidate)
+	if err != nil {
+		t.Fatalf("UpsertDecisionCandidate() error = %v", err)
+	}
+	if inserted.Status != domain.CandidatePending {
+		t.Fatalf("status = %q, want pending", inserted.Status)
+	}
+	candidate.ID = "cand_duplicate"
+	candidate.Title = "Use SQLite for local development"
+	candidate.UpdatedAt = now.Add(time.Minute)
+	updated, err := store.UpsertDecisionCandidate(ctx, candidate)
+	if err != nil {
+		t.Fatalf("UpsertDecisionCandidate(update) error = %v", err)
+	}
+	if updated.ID != inserted.ID {
+		t.Fatalf("idempotent candidate id = %q, want %q", updated.ID, inserted.ID)
+	}
+	if updated.Title != "Use SQLite for local development" {
+		t.Fatalf("updated title = %q", updated.Title)
+	}
+	rejected, err := store.UpdateDecisionCandidateStatus(ctx, ports.DecisionCandidateStatusUpdate{
+		ID:               inserted.ID,
+		WorkspaceID:      workspace.ID,
+		Status:           domain.CandidateRejected,
+		RejectionSummary: "Too generic.",
+		UpdatedAt:        now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("UpdateDecisionCandidateStatus(reject) error = %v", err)
+	}
+	if rejected.Status != domain.CandidateRejected || rejected.RejectionSummary == "" {
+		t.Fatalf("rejected candidate = %+v", rejected)
+	}
+	pending, err := store.ListDecisionCandidates(ctx, ports.DecisionCandidateQuery{WorkspaceID: workspace.ID})
+	if err != nil {
+		t.Fatalf("ListDecisionCandidates(pending) error = %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("pending candidates after reject = %d, want 0", len(pending))
+	}
+	candidate.Title = "Use SQLite after rejection refresh"
+	candidate.UpdatedAt = now.Add(3 * time.Minute)
+	refreshed, err := store.UpsertDecisionCandidate(ctx, candidate)
+	if err != nil {
+		t.Fatalf("UpsertDecisionCandidate(refresh rejected) error = %v", err)
+	}
+	if refreshed.Status != domain.CandidateRejected {
+		t.Fatalf("refreshed status = %q, want rejected", refreshed.Status)
+	}
+	all, err := store.ListDecisionCandidates(ctx, ports.DecisionCandidateQuery{WorkspaceID: workspace.ID, AllStatuses: true})
+	if err != nil {
+		t.Fatalf("ListDecisionCandidates(all) error = %v", err)
+	}
+	if len(all) != 1 {
+		t.Fatalf("all candidates = %d, want 1", len(all))
 	}
 }

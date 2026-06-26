@@ -145,6 +145,30 @@ func ParseDecisionStatus(value string) (DecisionStatus, error) {
 	}
 }
 
+type DecisionCandidateStatus string
+
+const (
+	CandidatePending  DecisionCandidateStatus = "pending"
+	CandidateAccepted DecisionCandidateStatus = "accepted"
+	CandidateRejected DecisionCandidateStatus = "rejected"
+)
+
+func ParseDecisionCandidateStatus(value string) (DecisionCandidateStatus, error) {
+	if strings.TrimSpace(value) == "" {
+		return CandidatePending, nil
+	}
+	switch DecisionCandidateStatus(strings.ToLower(strings.TrimSpace(value))) {
+	case CandidatePending:
+		return CandidatePending, nil
+	case CandidateAccepted:
+		return CandidateAccepted, nil
+	case CandidateRejected:
+		return CandidateRejected, nil
+	default:
+		return "", fmt.Errorf("invalid decision candidate status %q", value)
+	}
+}
+
 type Workspace struct {
 	ID              string         `json:"id"`
 	RepoRoot        string         `json:"repo_root"`
@@ -236,6 +260,66 @@ func (d Decision) Validate() error {
 
 func (d Decision) IsActive() bool {
 	return d.ValidTo == nil
+}
+
+type DecisionCandidate struct {
+	ID                 string                  `json:"id"`
+	WorkspaceID        string                  `json:"workspace_id"`
+	Type               string                  `json:"type"`
+	Title              string                  `json:"title"`
+	Outcome            string                  `json:"outcome"`
+	Rationale          string                  `json:"rationale,omitempty"`
+	Confidence         float64                 `json:"confidence"`
+	SourcePath         string                  `json:"source_path"`
+	SourceTitle        string                  `json:"source_title,omitempty"`
+	SourceSnippet      string                  `json:"source_snippet"`
+	SourceHash         string                  `json:"source_hash"`
+	Detector           string                  `json:"detector"`
+	Status             DecisionCandidateStatus `json:"status"`
+	AcceptedDecisionID string                  `json:"accepted_decision_id,omitempty"`
+	RejectionSummary   string                  `json:"rejection_summary,omitempty"`
+	CreatedAt          time.Time               `json:"created_at"`
+	UpdatedAt          time.Time               `json:"updated_at"`
+}
+
+func (c DecisionCandidate) Validate() error {
+	if strings.TrimSpace(c.ID) == "" {
+		return errors.New("decision candidate id is required")
+	}
+	if strings.TrimSpace(c.WorkspaceID) == "" {
+		return errors.New("decision candidate workspace_id is required")
+	}
+	if strings.TrimSpace(c.Type) == "" {
+		return errors.New("decision candidate type is required")
+	}
+	if strings.TrimSpace(c.Title) == "" {
+		return errors.New("decision candidate title is required")
+	}
+	if strings.TrimSpace(c.Outcome) == "" {
+		return errors.New("decision candidate outcome is required")
+	}
+	if c.Confidence < 0 || c.Confidence > 1 {
+		return errors.New("decision candidate confidence must be between 0 and 1")
+	}
+	if strings.TrimSpace(c.SourcePath) == "" {
+		return errors.New("decision candidate source_path is required")
+	}
+	if strings.TrimSpace(c.SourceSnippet) == "" {
+		return errors.New("decision candidate source_snippet is required")
+	}
+	if strings.TrimSpace(c.SourceHash) == "" {
+		return errors.New("decision candidate source_hash is required")
+	}
+	if strings.TrimSpace(c.Detector) == "" {
+		return errors.New("decision candidate detector is required")
+	}
+	if _, err := ParseDecisionCandidateStatus(string(c.Status)); err != nil {
+		return err
+	}
+	if c.Status == CandidateAccepted && strings.TrimSpace(c.AcceptedDecisionID) == "" {
+		return errors.New("accepted decision candidate requires accepted_decision_id")
+	}
+	return nil
 }
 
 type Alternative struct {

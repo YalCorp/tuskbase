@@ -184,6 +184,33 @@ func TestFoundationTools(t *testing.T) {
 	callToolOK(t, ctx, clientSession, "tuskbase_recent", map[string]any{"workspace_id": workspaceID})
 	callToolOK(t, ctx, clientSession, "tuskbase_conflicts", map[string]any{"workspace_id": workspaceID})
 
+	importRepo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(importRepo, "README.md"), []byte("# Import Repo\n\nWe require source-backed imported decisions."), 0o644); err != nil {
+		t.Fatalf("write import README: %v", err)
+	}
+	importScan := callToolOK(t, ctx, clientSession, "tuskbase_import_scan", map[string]any{"repo_path": importRepo})
+	var scanned struct {
+		Workspace struct {
+			ID string `json:"id"`
+		} `json:"workspace"`
+		Candidates []struct {
+			ID string `json:"id"`
+		} `json:"candidates"`
+	}
+	decodeStructured(t, importScan.StructuredContent, &scanned)
+	if scanned.Workspace.ID == "" || len(scanned.Candidates) == 0 {
+		t.Fatalf("import scan structured content = %+v", scanned)
+	}
+	importList := callToolOK(t, ctx, clientSession, "tuskbase_import_list", map[string]any{"workspace_id": scanned.Workspace.ID})
+	var listed struct {
+		Count int `json:"count"`
+	}
+	decodeStructured(t, importList.StructuredContent, &listed)
+	if listed.Count == 0 {
+		t.Fatalf("import list count = 0")
+	}
+	callToolOK(t, ctx, clientSession, "tuskbase_import_reject", map[string]any{"candidate_id": scanned.Candidates[0].ID, "summary": "MCP smoke rejection."})
+
 	resources, err := clientSession.ListResourceTemplates(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListResourceTemplates() error = %v", err)
@@ -230,7 +257,13 @@ func callToolOK(t *testing.T, ctx context.Context, session *mcp.ClientSession, n
 		t.Fatalf("CallTool(%s) error = %v", name, err)
 	}
 	if result.IsError {
-		t.Fatalf("CallTool(%s) result error: %v", name, result.GetError())
+		var text string
+		if len(result.Content) > 0 {
+			if content, ok := result.Content[0].(*mcp.TextContent); ok {
+				text = content.Text
+			}
+		}
+		t.Fatalf("CallTool(%s) result error: %v text=%q content=%#v", name, result.GetError(), text, result.Content)
 	}
 	if result.StructuredContent == nil {
 		t.Fatalf("CallTool(%s) returned no structured content", name)

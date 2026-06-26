@@ -1,10 +1,13 @@
 package daemon_test
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -148,6 +151,41 @@ func TestRESTNotMountedByDefault(t *testing.T) {
 	d.Handler().ServeHTTP(resp, req)
 	if resp.Code != http.StatusNotFound {
 		t.Fatalf("REST route status = %d, want 404", resp.Code)
+	}
+}
+
+func TestControlAPIMountedByDefaultWithAuth(t *testing.T) {
+	ctx := context.Background()
+	authPolicy, err := daemon.NewLocalAPIKeyPolicy("local-secret")
+	if err != nil {
+		t.Fatalf("NewLocalAPIKeyPolicy() error = %v", err)
+	}
+	d, err := daemon.New(ctx, daemon.Config{EnableMCP: true, MCPPath: "/mcp"}, daemon.SQLiteStoreFactory{Path: filepath.Join(t.TempDir(), "tuskbase.db")}, authPolicy)
+	if err != nil {
+		t.Fatalf("daemon.New() error = %v", err)
+	}
+	defer d.Close()
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Control Repo\n\nWe require reviewable imports."), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	body := []byte(`{"repo_path":` + strconv.Quote(repo) + `}`)
+	req := httptest.NewRequest(http.MethodPost, "/control/v1/import/scan", bytes.NewReader(body))
+	resp := httptest.NewRecorder()
+	d.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated control status = %d, want 401", resp.Code)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/control/v1/import/scan", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer local-secret")
+	req.Header.Set("Content-Type", "application/json")
+	resp = httptest.NewRecorder()
+	d.Handler().ServeHTTP(resp, req)
+	if resp.Code != http.StatusOK {
+		t.Fatalf("authenticated control status = %d body = %q", resp.Code, resp.Body.String())
+	}
+	if !strings.Contains(resp.Body.String(), `"candidates"`) {
+		t.Fatalf("control body = %q", resp.Body.String())
 	}
 }
 

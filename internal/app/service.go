@@ -27,6 +27,7 @@ const (
 type Store interface {
 	ports.WorkspaceStore
 	ports.DecisionStore
+	ports.DecisionCandidateStore
 	ports.DocumentStore
 	ports.ReceiptStore
 	ports.AssessmentStore
@@ -258,8 +259,10 @@ func (s *Service) Remember(ctx context.Context, in RememberInput) (RememberOutpu
 	}
 	out := RememberOutput{Decision: decision, IndexingStatus: "indexed", QualityWarnings: outWarnings}
 	if err := s.search.IndexDecision(ctx, decision); err != nil {
-		out.IndexingStatus = "error"
-		out.IndexingError = err.Error()
+		if retryErr := s.search.IndexDecision(ctx, decision); retryErr != nil {
+			out.IndexingStatus = "error"
+			out.IndexingError = retryErr.Error()
+		}
 	}
 	return out, nil
 }
@@ -867,7 +870,7 @@ func scanRepoDocuments(root string) ([]domain.RepoDocument, error) {
 		}
 		text := string(data)
 		for i, chunk := range chunkText(text, 6000) {
-			idHash := sha256.Sum256([]byte(rel + fmt.Sprintf("#%d", i)))
+			idHash := sha256.Sum256([]byte(filepath.Clean(root) + "\x00" + rel + fmt.Sprintf("#%d", i)))
 			docs = append(docs, domain.RepoDocument{
 				ID:         "doc_" + hex.EncodeToString(idHash[:])[:24],
 				Path:       rel,
@@ -878,11 +881,17 @@ func scanRepoDocuments(root string) ([]domain.RepoDocument, error) {
 		}
 		return nil
 	}
-	for _, rel := range []string{"README.md", "AGENTS.md"} {
+	addIfExists := func(rel string) error {
 		if _, err := os.Stat(filepath.Join(root, rel)); err == nil {
 			if err := add(rel); err != nil {
-				return nil, err
+				return err
 			}
+		}
+		return nil
+	}
+	for _, rel := range []string{"README.md", "AGENTS.md", "CLAUDE.md", ".github/copilot-instructions.md"} {
+		if err := addIfExists(rel); err != nil {
+			return nil, err
 		}
 	}
 	entries, err := os.ReadDir(root)
@@ -907,6 +916,60 @@ func scanRepoDocuments(root string) ([]domain.RepoDocument, error) {
 				return filepath.SkipDir
 			}
 			if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".md") {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			return add(rel)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	adrsRoot := filepath.Join(root, "adrs")
+	if _, err := os.Stat(adrsRoot); err == nil {
+		err = filepath.WalkDir(adrsRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if d.IsDir() || !strings.EqualFold(filepath.Ext(d.Name()), ".md") {
+				return nil
+			}
+			rel, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			return add(rel)
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	for _, rulesRoot := range []string{".cursor/rules", ".windsurf/rules"} {
+		absRulesRoot := filepath.Join(root, filepath.FromSlash(rulesRoot))
+		info, err := os.Stat(absRulesRoot)
+		if err != nil {
+			continue
+		}
+		if !info.IsDir() {
+			if err := add(rulesRoot); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		err = filepath.WalkDir(absRulesRoot, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				return err
+			}
+			if d.IsDir() && shouldSkipDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			if d.IsDir() {
 				return nil
 			}
 			rel, err := filepath.Rel(root, path)

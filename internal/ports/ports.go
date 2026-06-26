@@ -28,6 +28,13 @@ type DecisionStore interface {
 	QueryDecisions(context.Context, DecisionQuery) ([]domain.Decision, error)
 }
 
+type DecisionCandidateStore interface {
+	UpsertDecisionCandidate(context.Context, domain.DecisionCandidate) (domain.DecisionCandidate, error)
+	GetDecisionCandidate(context.Context, string) (domain.DecisionCandidate, error)
+	ListDecisionCandidates(context.Context, DecisionCandidateQuery) ([]domain.DecisionCandidate, error)
+	UpdateDecisionCandidateStatus(context.Context, DecisionCandidateStatusUpdate) (domain.DecisionCandidate, error)
+}
+
 type DocumentStore interface {
 	ReplaceWorkspaceDocuments(context.Context, string, []domain.RepoDocument) error
 	ListWorkspaceDocuments(context.Context, string, int) ([]domain.RepoDocument, error)
@@ -59,6 +66,22 @@ type DecisionQuery struct {
 	RelationshipType domain.RelationshipType
 	MinConfidence    float64
 	Limit            int
+}
+
+type DecisionCandidateQuery struct {
+	WorkspaceID string
+	Status      domain.DecisionCandidateStatus
+	AllStatuses bool
+	Limit       int
+}
+
+type DecisionCandidateStatusUpdate struct {
+	ID                 string
+	WorkspaceID        string
+	Status             domain.DecisionCandidateStatus
+	AcceptedDecisionID string
+	RejectionSummary   string
+	UpdatedAt          time.Time
 }
 
 type AssessmentQuery struct {

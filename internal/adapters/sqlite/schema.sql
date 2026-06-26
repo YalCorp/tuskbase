@@ -40,6 +40,30 @@ ON decisions(workspace_id, valid_to, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_decisions_supersedes
 ON decisions(workspace_id, supersedes_id);
 
+CREATE TABLE IF NOT EXISTS decision_candidates (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    title TEXT NOT NULL,
+    outcome TEXT NOT NULL,
+    rationale TEXT NOT NULL DEFAULT '',
+    confidence REAL NOT NULL,
+    source_path TEXT NOT NULL,
+    source_title TEXT NOT NULL DEFAULT '',
+    source_snippet TEXT NOT NULL,
+    source_hash TEXT NOT NULL,
+    detector TEXT NOT NULL,
+    status TEXT NOT NULL,
+    accepted_decision_id TEXT NOT NULL DEFAULT '',
+    rejection_summary TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(workspace_id, source_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_decision_candidates_workspace_status
+ON decision_candidates(workspace_id, status, updated_at DESC);
+
 CREATE TABLE IF NOT EXISTS decision_alternatives (
     id TEXT PRIMARY KEY,
     decision_id TEXT NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,

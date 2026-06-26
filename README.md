@@ -38,12 +38,13 @@ Tuskbase is in its first implementation slice. The current product surface is us
 Implemented now:
 
 - Go CLI for setup, diagnostics, daemon lifecycle, and local key management.
-- MCP tools for automatic prepare/finish workflow plus `attach`, `context`, `lookup`, `check`, `preflight`, `remember`, `assess`, structured decision query, conflict resolution, reconciliation, stats, recent decisions, and active conflicts.
+- MCP tools for automatic prepare/finish workflow plus `attach`, `context`, `lookup`, `check`, `preflight`, `remember`, `assess`, structured decision query, conflict resolution, reconciliation, stats, recent decisions, active conflicts, and reviewable repo-document imports.
 - Demo stdio MCP mode for quick local experiments.
 - Local Basic daemon mode with SQLite, loopback HTTP MCP, and stdio bridge auth.
 - Local Shared mode with Postgres selected from Docker-managed pgvector Postgres or an existing pgvector-enabled Postgres DSN.
 - Semantic active-memory lookup with pgvector when embeddings are configured, deterministic text fallback, preflight conflict detection, lookup receipts, and optional OpenAI or Ollama embeddings.
 - Local bearer auth for HTTP MCP/REST, auth-derived actor attribution, and named Local Shared agent keys.
+- Authenticated local control API for daemon-backed CLI operations, including document import review.
 - `tuskbase doctor` and bridge diagnostics for common local setup failures.
 - Compressed local disaster-recovery backups for Local Basic SQLite and Docker-managed Local Shared Postgres, with manual create/list/restore commands and automatic write-triggered retention.
 - Optional REST API for local development/debugging.
@@ -152,6 +153,8 @@ tuskbase auth list
 tuskbase auth rotate
 tuskbase auth add --name windsurf --role agent
 tuskbase auth rotate --name codex
+tuskbase import scan --repo .
+tuskbase import list --workspace <workspace-id>
 ```
 
 Manual HTTP/environment-variable setup is available for developers and CI with `--transport http`. `TUSKBASE_AGENT_KEYS` takes precedence over `TUSKBASE_API_KEY`; stored setup config is used when neither env var is set. See [.env.example](.env.example).
@@ -214,8 +217,26 @@ Docker volume loss can be recovered from a Tuskbase backup with `tuskbase backup
 | `tuskbase_stats` | Return aggregate trail-health stats for decisions, conflicts, assessments, and completeness. |
 | `tuskbase_recent` | Show recent active decisions for a workspace. |
 | `tuskbase_conflicts` | Show active conflicts for a workspace. |
+| `tuskbase_import_scan` | Scan known repo documentation and persist reviewable decision candidates. |
+| `tuskbase_import_list` | List imported decision candidates, defaulting to pending. |
+| `tuskbase_import_accept` | Accept one candidate as an active decision with document evidence. |
+| `tuskbase_import_reject` | Reject one candidate while preserving review history. |
 
 Conflict resolution and superseding prior decisions require explicit user approval. A preflight conflict is a hard stop for editing until the user approves a changed plan, a resolution, or a reconciliation decision.
+
+### Repo Document Import
+
+The importer scans conservative repo documentation sources such as `README.md`, `AGENTS.md`, `CLAUDE.md`, top-level Markdown, `docs/**/*.md`, `adrs/**/*.md`, Cursor and Windsurf rules, and GitHub Copilot instructions. It creates persisted candidates, not active memory. A candidate affects lookup and preflight only after `tuskbase import accept <candidate-id>` or `tuskbase_import_accept` stores it through the normal `remember` path with `document` evidence.
+
+V1 extraction is offline and rule-based: ADR-like documents, explicit "we use/choose/require/avoid/do not" language, and durable repo rules. Optional Ollama-assisted extraction is future work.
+
+```bash
+tuskbase import scan --repo .
+tuskbase import list --workspace <workspace-id>
+tuskbase import show <candidate-id>
+tuskbase import accept <candidate-id>
+tuskbase import reject <candidate-id> --summary "Too broad"
+```
 
 ### Optional REST API
 

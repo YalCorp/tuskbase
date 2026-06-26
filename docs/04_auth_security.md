@@ -14,6 +14,7 @@ Implemented today:
 - stdio MCP for Demo mode has no auth.
 - HTTP MCP and optional REST are loopback-only by default.
 - HTTP MCP and optional REST require `Authorization: Bearer <key>` by default.
+- The daemon also mounts a small authenticated loopback local control API for CLI operations; it is separate from the optional debug REST API.
 - `tuskbase bridge` lets local MCP clients use Tuskbase-managed credentials over stdio instead of requiring per-shell token environment variables, and checks daemon readiness before completing MCP initialization.
 - `/healthz` remains unauthenticated and reports the active auth policy and auth source.
 - `tuskbase setup` generates and stores local keys, then attempts to install and start a user-scope daemon service for Local Basic and Local Shared after Local Shared Postgres is configured through Docker or an existing DSN; env vars such as `TUSKBASE_API_KEY`, `TUSKBASE_AGENT_KEYS`, and `TUSKBASE_POSTGRES_DSN` remain manual overrides.

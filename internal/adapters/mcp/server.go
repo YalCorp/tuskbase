@@ -143,6 +143,38 @@ func NewServerWithVersion(service *app.Service, version string) *mcp.Server {
 		return nil, conflictsOutput{Conflicts: conflicts}, err
 	})
 
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_import_scan",
+		Description: "Scan known repo documentation and persist reviewable decision candidates. Candidates are not active memory until accepted.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.ImportScanInput) (*mcp.CallToolResult, app.ImportScanOutput, error) {
+		out, err := service.ImportScan(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_import_list",
+		Description: "List imported decision candidates for review. Defaults to pending candidates.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.ImportListInput) (*mcp.CallToolResult, app.ImportListOutput, error) {
+		out, err := service.ImportList(ctx, in)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_import_accept",
+		Description: "Accept one imported decision candidate and store it as an active decision with source-document evidence.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in importCandidateInput) (*mcp.CallToolResult, app.ImportAcceptOutput, error) {
+		out, err := service.ImportAccept(ctx, in.CandidateID)
+		return nil, out, err
+	})
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "tuskbase_import_reject",
+		Description: "Reject one imported decision candidate while preserving review history.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in app.ImportRejectInput) (*mcp.CallToolResult, app.ImportRejectOutput, error) {
+		out, err := service.ImportReject(ctx, in)
+		return nil, out, err
+	})
+
 	server.AddResourceTemplate(&mcp.ResourceTemplate{
 		Name:        "tuskbase_context",
 		Title:       "Tuskbase Context",
@@ -187,4 +219,8 @@ type conflictsInput struct {
 
 type conflictsOutput struct {
 	Conflicts []domain.Conflict `json:"conflicts"`
+}
+
+type importCandidateInput struct {
+	CandidateID string `json:"candidate_id"`
 }

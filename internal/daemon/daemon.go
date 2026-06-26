@@ -208,6 +208,7 @@ func (d *TuskbaseDaemon) buildHandler() http.Handler {
 		mcpHandler := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server { return d.mcp }, nil)
 		mux.Handle(d.cfg.MCPPath, d.auth.WrapHTTP(mcpHandler))
 	}
+	mux.Handle("/control/", d.auth.WrapHTTP(httpapi.NewControlServer(d.service)))
 	if d.cfg.EnableREST {
 		mux.Handle("/", d.auth.WrapHTTP(httpapi.NewServer(d.service)))
 	}

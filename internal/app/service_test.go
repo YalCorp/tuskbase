@@ -725,6 +725,117 @@ func TestCheckAvoidsDifferentMechanismFalsePositive(t *testing.T) {
 	}
 }
 
+func TestImportScanListAcceptReject(t *testing.T) {
+	ctx := context.Background()
+	service, closeStore := newTestService(t)
+	defer closeStore()
+	repo := t.TempDir()
+	if err := os.WriteFile(filepath.Join(repo, "README.md"), []byte("# Import Repo\n\nWe require Postgres for shared decision memory.\n\nDo not store secrets in memory records."), 0o644); err != nil {
+		t.Fatalf("write README: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "AGENTS.md"), []byte("# Agent Rules\n\nWe use gofmt for all Go changes."), 0o644); err != nil {
+		t.Fatalf("write AGENTS: %v", err)
+	}
+
+	scanned, err := service.ImportScan(ctx, app.ImportScanInput{RepoPath: repo})
+	if err != nil {
+		t.Fatalf("ImportScan() error = %v", err)
+	}
+	if scanned.Scanned == 0 || len(scanned.Candidates) < 2 {
+		t.Fatalf("ImportScan() scanned=%d candidates=%d", scanned.Scanned, len(scanned.Candidates))
+	}
+	listed, err := service.ImportList(ctx, app.ImportListInput{WorkspaceID: scanned.Workspace.ID})
+	if err != nil {
+		t.Fatalf("ImportList() error = %v", err)
+	}
+	if listed.Count != len(scanned.Candidates) {
+		t.Fatalf("pending count = %d, want %d", listed.Count, len(scanned.Candidates))
+	}
+	var postgresCandidate domain.DecisionCandidate
+	var rejectCandidates []domain.DecisionCandidate
+	for _, candidate := range listed.Candidates {
+		if strings.Contains(candidate.Outcome, "Postgres") {
+			postgresCandidate = candidate
+		} else {
+			rejectCandidates = append(rejectCandidates, candidate)
+		}
+	}
+	if postgresCandidate.ID == "" || len(rejectCandidates) == 0 {
+		t.Fatalf("missing expected candidates: %+v", listed.Candidates)
+	}
+	before, err := service.Preflight(ctx, app.PreflightInput{WorkspaceID: scanned.Workspace.ID, Proposal: "Use Redis for shared decision memory."})
+	if err != nil {
+		t.Fatalf("Preflight(before accept) error = %v", err)
+	}
+	if len(before.Relationships) != 0 || len(before.Conflicts) != 0 {
+		t.Fatalf("pending import affected preflight: %+v", before)
+	}
+	principal := app.Principal{
+		Subject:    "codex",
+		Role:       app.RoleAgent,
+		Actor:      domain.Actor{Kind: domain.ActorAgent, Name: "codex"},
+		AuthSource: app.AuthSourceLocalSharedKey,
+	}
+	accepted, err := service.ImportAccept(app.ContextWithPrincipal(ctx, principal), postgresCandidate.ID)
+	if err != nil {
+		t.Fatalf("ImportAccept() error = %v", err)
+	}
+	if accepted.Candidate.Status != domain.CandidateAccepted {
+		t.Fatalf("accepted status = %q", accepted.Candidate.Status)
+	}
+	if accepted.Decision.Actor.Name != "codex" {
+		t.Fatalf("accepted actor = %+v", accepted.Decision.Actor)
+	}
+	if len(accepted.Decision.Evidence) != 1 || accepted.Decision.Evidence[0].Kind != "document" {
+		t.Fatalf("accepted evidence = %+v", accepted.Decision.Evidence)
+	}
+	lookup, err := service.Lookup(ctx, app.LookupInput{WorkspaceID: scanned.Workspace.ID, Query: "Postgres shared decision memory"})
+	if err != nil {
+		t.Fatalf("Lookup(after accept) error = %v", err)
+	}
+	if !containsSearchResult(lookup.Results, accepted.Decision.ID, "decision") {
+		t.Fatalf("lookup did not include accepted decision: %+v", lookup.Results)
+	}
+	for _, rejectCandidate := range rejectCandidates {
+		rejected, err := service.ImportReject(ctx, app.ImportRejectInput{CandidateID: rejectCandidate.ID, Summary: "Too broad."})
+		if err != nil {
+			t.Fatalf("ImportReject() error = %v", err)
+		}
+		if rejected.Candidate.Status != domain.CandidateRejected {
+			t.Fatalf("rejected status = %q", rejected.Candidate.Status)
+		}
+	}
+	if _, err := service.ImportScan(ctx, app.ImportScanInput{RepoPath: repo}); err != nil {
+		t.Fatalf("ImportScan(second) error = %v", err)
+	}
+	pending, err := service.ImportList(ctx, app.ImportListInput{WorkspaceID: scanned.Workspace.ID})
+	if err != nil {
+		t.Fatalf("ImportList(after status transitions) error = %v", err)
+	}
+	if pending.Count != 0 {
+		t.Fatalf("pending after accept/reject and rescan = %d, want 0", pending.Count)
+	}
+}
+
+func TestRuleBasedExtractorADR(t *testing.T) {
+	extractor := app.RuleBasedExtractor{}
+	candidates, err := extractor.ExtractCandidates(context.Background(), app.ImportDocument{
+		WorkspaceID: "ws_test",
+		Path:        "adrs/0001-postgres.md",
+		Title:       "Use Postgres for Local Shared",
+		Content:     "# Use Postgres for Local Shared\n\nStatus: Accepted\n\nDecision: We choose Postgres for shared local memory.\n\nPostgres supports multiple agents.",
+	})
+	if err != nil {
+		t.Fatalf("ExtractCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("candidates = %d, want 1", len(candidates))
+	}
+	if candidates[0].Detector != "adr:v1" || !strings.Contains(candidates[0].Outcome, "Postgres") {
+		t.Fatalf("ADR candidate = %+v", candidates[0])
+	}
+}
+
 type failingSearch struct {
 	ports.SearchIndex
 }
@@ -786,4 +897,13 @@ func rememberDecision(t *testing.T, ctx context.Context, service *app.Service, w
 		t.Fatalf("Remember() error = %v", err)
 	}
 	return remembered
+}
+
+func containsSearchResult(results []ports.SearchResult, entityID, kind string) bool {
+	for _, result := range results {
+		if result.EntityID == entityID && result.Kind == kind {
+			return true
+		}
+	}
+	return false
 }

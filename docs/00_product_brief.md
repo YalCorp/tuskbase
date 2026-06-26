@@ -84,6 +84,8 @@ The user or agent attaches a workspace through the local API or MCP server.
 
 Tuskbase scans useful repo files and creates or updates a workspace profile. It should detect stack, conventions, architecture constraints, external services, and important prior notes.
 
+The importer can also scan known repo documentation and create reviewable decision candidates. These imported candidates are separate from canonical decisions until a user accepts one candidate at a time. Acceptance stores the candidate through the normal remember path with source-document evidence; pending or rejected candidates are not active guidance.
+
 ### Ask For Context
 
 The user or agent sends a lookup request:

@@ -464,6 +464,84 @@ func (s *Store) QueryDecisions(ctx context.Context, q ports.DecisionQuery) ([]do
 	return decisions, nil
 }
 
+func (s *Store) UpsertDecisionCandidate(ctx context.Context, c domain.DecisionCandidate) (domain.DecisionCandidate, error) {
+	if c.Status == "" {
+		c.Status = domain.CandidatePending
+	}
+	if err := c.Validate(); err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	_, err := s.db.ExecContext(ctx, upsertDecisionCandidateSQL, c.ID, c.WorkspaceID, c.Type, c.Title, c.Outcome, c.Rationale, c.Confidence, c.SourcePath, c.SourceTitle, c.SourceSnippet, c.SourceHash, c.Detector, c.Status, c.AcceptedDecisionID, c.RejectionSummary, formatTime(c.CreatedAt), formatTime(c.UpdatedAt))
+	if err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	return s.getDecisionCandidateBySourceHash(ctx, c.WorkspaceID, c.SourceHash)
+}
+
+func (s *Store) GetDecisionCandidate(ctx context.Context, id string) (domain.DecisionCandidate, error) {
+	row := s.db.QueryRowContext(ctx, getDecisionCandidateSQL(), id)
+	return scanDecisionCandidate(row)
+}
+
+func (s *Store) getDecisionCandidateBySourceHash(ctx context.Context, workspaceID, sourceHash string) (domain.DecisionCandidate, error) {
+	row := s.db.QueryRowContext(ctx, getDecisionCandidateBySourceHashSQL(), workspaceID, sourceHash)
+	return scanDecisionCandidate(row)
+}
+
+func (s *Store) ListDecisionCandidates(ctx context.Context, q ports.DecisionCandidateQuery) ([]domain.DecisionCandidate, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	clauses := []string{"workspace_id = ?"}
+	args := []any{q.WorkspaceID}
+	if !q.AllStatuses {
+		status := q.Status
+		if status == "" {
+			status = domain.CandidatePending
+		}
+		clauses = append(clauses, "status = ?")
+		args = append(args, status)
+	}
+	args = append(args, limit)
+	rows, err := s.db.QueryContext(ctx, listDecisionCandidatesSQL(strings.Join(clauses, " AND ")), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var candidates []domain.DecisionCandidate
+	for rows.Next() {
+		c, err := scanDecisionCandidate(rows)
+		if err != nil {
+			return nil, err
+		}
+		candidates = append(candidates, c)
+	}
+	return candidates, rows.Err()
+}
+
+func (s *Store) UpdateDecisionCandidateStatus(ctx context.Context, u ports.DecisionCandidateStatusUpdate) (domain.DecisionCandidate, error) {
+	status, err := domain.ParseDecisionCandidateStatus(string(u.Status))
+	if err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	result, err := s.db.ExecContext(ctx, updateDecisionCandidateStatusSQL, status, strings.TrimSpace(u.AcceptedDecisionID), strings.TrimSpace(u.RejectionSummary), formatTime(u.UpdatedAt), strings.TrimSpace(u.ID), strings.TrimSpace(u.WorkspaceID))
+	if err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	if rows == 0 {
+		return domain.DecisionCandidate{}, sql.ErrNoRows
+	}
+	return s.GetDecisionCandidate(ctx, u.ID)
+}
+
 func replaceDecisionChildren(ctx context.Context, tx *sql.Tx, d domain.Decision) error {
 	for _, table := range []string{"decision_alternatives", "decision_claims", "decision_evidence", "decision_relationships"} {
 		column := "decision_id"
@@ -1187,6 +1265,20 @@ func scanDecisionBase(row rowScanner) (domain.Decision, error) {
 		d.TransactionTime = d.CreatedAt
 	}
 	return d, nil
+}
+
+func scanDecisionCandidate(row rowScanner) (domain.DecisionCandidate, error) {
+	var c domain.DecisionCandidate
+	var created, updated string
+	if err := row.Scan(
+		&c.ID, &c.WorkspaceID, &c.Type, &c.Title, &c.Outcome, &c.Rationale, &c.Confidence, &c.SourcePath, &c.SourceTitle,
+		&c.SourceSnippet, &c.SourceHash, &c.Detector, &c.Status, &c.AcceptedDecisionID, &c.RejectionSummary, &created, &updated,
+	); err != nil {
+		return domain.DecisionCandidate{}, err
+	}
+	c.CreatedAt = parseTime(created)
+	c.UpdatedAt = parseTime(updated)
+	return c, nil
 }
 
 func defaultDecisionTimes(d *domain.Decision) {

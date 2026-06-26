@@ -59,6 +59,7 @@ Infrastructure interfaces define the boundaries between core behavior and replac
 Important boundaries include:
 
 - durable records,
+- reviewable decision candidates,
 - decision relationships,
 - repo documents,
 - lookup receipts,
@@ -71,6 +72,8 @@ Concrete adapters implement these boundaries. Replacing an adapter should not re
 ## Canonical Records And Derived Indexes
 
 Canonical records should be stored through durable store interfaces. The first durable implementation may be SQLite for zero-config local use, while Postgres can follow as a team or scale adapter. The core architecture should not assume either one.
+
+Imported decision candidates are durable review records, but they are not canonical memory. They stay out of lookup and preflight until accepted, and acceptance writes a normal active decision with document evidence through the same application use case as any other remembered decision.
 
 Vector search is a retrieval layer, not the source of truth. Vector indexes are derived and rebuildable. If embedding generation or vector indexing fails, canonical decision writes should still succeed and derived indexing should be repairable later.
 

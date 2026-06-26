@@ -70,6 +70,8 @@ func execute(ctx context.Context, args []string, stdout, stderr io.Writer) error
 		return runDaemonCommand(ctx, args[1:], stdout, stderr)
 	case "backup":
 		return runBackupCommand(ctx, args[1:], stdout, stderr)
+	case "import":
+		return runImportCommand(ctx, args[1:], stdout, stderr)
 	case "doctor":
 		return runDoctor(ctx, args[1:], stdout, stderr)
 	case "init":
@@ -682,6 +684,11 @@ func printUsage(w io.Writer) {
 		p.Line("  backup create     Create a compressed local backup")
 		p.Line("  backup list       List local backups")
 		p.Line("  backup restore    Restore a backup after confirmation")
+		p.Section("Import")
+		p.Line("  import scan       Scan repo docs into reviewable candidates")
+		p.Line("  import list       List imported decision candidates")
+		p.Line("  import accept     Accept one candidate as active memory")
+		p.Line("  import reject     Reject one candidate")
 		p.Section("Auth")
 		p.Line("  auth list         Show local auth keys; use --reveal to print secrets")
 		p.Line("  auth rotate       Rotate Local Basic or Local Shared keys")
@@ -708,6 +715,10 @@ Commands:
   backup create     Create a compressed local backup
   backup list       List local backups
   backup restore    Restore a backup after confirmation
+  import scan       Scan repo docs into reviewable candidates
+  import list       List imported decision candidates
+  import accept     Accept one candidate as active memory
+  import reject     Reject one candidate
   version           Print version info
 
 Advanced:
